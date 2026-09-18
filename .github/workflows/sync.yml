@@ -1,0 +1,46 @@
+name: Skool sync
+
+# Keeps Close and GoHighLevel in step with the Skool free community.
+# Runs on a schedule so it does not depend on anyone's laptop being awake.
+on:
+  schedule:
+    - cron: "*/10 * * * *"     # every 10 minutes
+  workflow_dispatch:            # and on demand from the Actions tab
+
+concurrency:
+  group: skool-sync
+  cancel-in-progress: false     # never let two runs write at once
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # 1. Anything in Skool that never reached a CRM gets created in both.
+      #    This is the safety net: it catches a rejected field, a bad email,
+      #    an expired Zapier connection, a task-limit halt, or the Zap being off.
+      - name: Reconcile Skool -> Close + GoHighLevel
+        env:
+          SKOOL_COOKIE:   ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:  ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:        ${{ secrets.GHL_PIT }}
+        run: python scripts/reconcile_skool.py --pages 3 --fix
+
+      # 2. Promote valid free-text phone answers into Close's real phone field,
+      #    and repair numbers Close mangled with a "+1" prefix.
+      - name: Normalise phone numbers in Close
+        env:
+          SKOOL_COOKIE:   ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:  ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:        ${{ secrets.GHL_PIT }}
+          SKOOL_PAGES:    "3"
+        run: python scripts/close_phone_normalise.py --apply
