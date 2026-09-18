@@ -9,11 +9,12 @@ without depending on Zapier reporting anything.
 Usage:  reconcile_skool.py [--pages N] [--fix]
         --fix backfills whatever is missing (Close and GHL).
 """
-import json, re, sys, os, base64, urllib.request, urllib.error, urllib.parse
+import json, re, sys, os, time, base64, urllib.request, urllib.error, urllib.parse
 
 sys.path.insert(0, os.path.dirname(__file__))
 from skool_to_ghl import (pull_skool, ghl, clean_phone, iso_from_location, EMAIL_RE,
                           LOC, PIPE, STAGE, CF)
+import notify_slack
 
 CLOSE_KEY = os.environ["CLOSE_API_KEY"]
 CLOSE_AUTH = "Basic " + base64.b64encode((CLOSE_KEY + ":").encode()).decode()
@@ -29,15 +30,22 @@ def close(method, path, payload=None):
     r = urllib.request.Request("https://api.close.com/api/v1" + path,
         data=json.dumps(payload).encode() if payload is not None else None, method=method,
         headers={"Authorization": CLOSE_AUTH, "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
-    except urllib.error.HTTPError as e:
-        try: return e.code, json.loads(e.read().decode() or "{}")
-        except Exception: return e.code, {}
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            try: return e.code, json.loads(e.read().decode() or "{}")
+            except Exception: return e.code, {}
+        except Exception:
+            # Transient - a dropped connection here used to abort the whole run.
+            if attempt == 2: raise
+            time.sleep(3 * (attempt + 1))
 
 def in_close(email):
     q = urllib.parse.quote(f'email:"{email}"')
-    s, d = close("GET", f"/lead/?query={q}&_limit=1&_fields=id,display_name")
+    # "custom" pulls every custom field back as custom.cf_<id> keys - needed so we
+    # can see whether Slack has already been told about this person.
+    s, d = close("GET", f"/lead/?query={q}&_limit=1&_fields=id,display_name,custom")
     return (d.get("data") or [None])[0] if s == 200 else None
 
 _GHL_EMAILS = None
@@ -70,14 +78,32 @@ def main():
     pages = 2
     if "--pages" in sys.argv: pages = int(sys.argv[sys.argv.index("--pages")+1])
     fix = "--fix" in sys.argv
+    notify = "--no-notify" not in sys.argv
+    stamp_existing = "--stamp-existing" in sys.argv
+
     members = pull_skool(pages)
     valid = [m for m in members if m["email"] and EMAIL_RE.match(m["email"])]
     print(f"skool members checked: {len(members)} | with valid email: {len(valid)}\n")
 
+    # Keep the Close lead we found for each member. It carries the "Slack Notified At"
+    # stamp, which is what stops the team being pinged twice about the same person.
+    close_lead = {}
     miss_close, miss_ghl = [], []
     for m in valid:
-        if not in_close(m["email"]): miss_close.append(m)
-        if not in_ghl(m["email"]):   miss_ghl.append(m)
+        lead = in_close(m["email"])
+        close_lead[m["email"]] = lead
+        if not lead: miss_close.append(m)
+        if not in_ghl(m["email"]): miss_ghl.append(m)
+
+    if stamp_existing:
+        n = 0
+        for m in valid:
+            lead = close_lead.get(m["email"])
+            if lead and not notify_slack.already_notified(lead):
+                notify_slack.stamp_close(close, lead["id"]); n += 1
+        print(f"\nstamped {n} existing leads as already-notified. "
+              f"Slack will only post genuinely new joins from here.")
+        return
 
     print(f"MISSING FROM CLOSE: {len(miss_close)}")
     for m in miss_close: print(f"   {(m['first'] or '')+' '+(m['last'] or ''):28} {m['email']:36} joined {m['joined'][:19] if m['joined'] else '?'}")
@@ -101,6 +127,10 @@ def main():
         if s == 200 and d.get("id"):
             close("POST", "/opportunity/", {"lead_id":d["id"], "status_id":CLOSE_PIPE_STAGE, "value":0,
                                             "note":"Skool free community signup (reconciler)"})
+            # Newly created, so it carries no notified stamp - Slack will pick it up below.
+            close_lead[m["email"]] = {"id": d["id"]}
+
+    ghl_contact = {}
     for m in miss_ghl:
         iso = iso_from_location(m["location"]); ph = clean_phone(m["phone_raw"], iso)
         name = f"{m['first'] or ''} {m['last'] or ''}".strip()
@@ -115,9 +145,38 @@ def main():
         s, d = ghl("POST", "/contacts/upsert", body)
         c = (d.get("contact") or {})
         print(f"  ghl upsert {name}: {s} {c.get('id','')}")
+        if c.get("id"):
+            ghl_contact[m["email"]] = c["id"]
         if c.get("id") and not in_ghl(m["email"]):
             ghl("POST", "/opportunities/", {"pipelineId":PIPE,"locationId":LOC,"pipelineStageId":STAGE,
                 "name":f"{name} — Skool free community","status":"open","contactId":c["id"],"monetaryValue":0})
+
+    # ---- Tell the team ------------------------------------------------------
+    # Driven off the Close stamp rather than "did we just create it", so a member
+    # the Zap happened to reach first is still announced exactly once.
+    if not (notify and notify_slack.enabled):
+        if notify:
+            print("\nslack: SLACK_BOT_TOKEN not set - notifications skipped")
+        return
+
+    pending = [m for m in valid
+               if close_lead.get(m["email"]) and not notify_slack.already_notified(close_lead[m["email"]])]
+    if not pending:
+        print("\nslack: nothing new to announce")
+        return
+
+    if len(pending) > notify_slack.NOTIFY_MAX:
+        ok = notify_slack.post_digest(pending, reason=f"{len(pending)} at once, likely a backfill")
+        print(f"\nslack: digest of {len(pending)} members -> {ok}")
+        if ok:
+            for m in pending:
+                notify_slack.stamp_close(close, close_lead[m['email']]['id'])
+    else:
+        for m in pending:
+            if notify_slack.post_member(m, close_id=close_lead[m["email"]]["id"],
+                                        ghl_contact_id=ghl_contact.get(m["email"])):
+                notify_slack.stamp_close(close, close_lead[m["email"]]["id"])
+                print(f"  slack announced {m['email']}")
 
 if __name__ == "__main__":
     main()

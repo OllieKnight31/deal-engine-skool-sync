@@ -19,7 +19,7 @@ Usage:
     skool_to_ghl.py --apply         # write to GHL
     skool_to_ghl.py --pages 55 --apply     # full backfill
 """
-import json, re, sys, os, urllib.request, urllib.error
+import json, re, sys, os, time, urllib.request, urllib.error
 
 PIT   = os.environ["GHL_PIT"]
 LOC   = "2RrjNuz0M4MTFlxpW37k"
@@ -55,11 +55,15 @@ def ghl(method, path, payload=None, base="https://services.leadconnectorhq.com")
         headers={"Authorization": f"Bearer {PIT}", "Version": "2021-07-28",
                  "Content-Type": "application/json", "Accept": "application/json",
                  "User-Agent": "curl/8.7.1"})
-    try:
-        with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
-    except urllib.error.HTTPError as e:
-        try: return e.code, json.loads(e.read().decode() or "{}")
-        except Exception: return e.code, {}
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:
+            try: return e.code, json.loads(e.read().decode() or "{}")
+            except Exception: return e.code, {}
+        except Exception as e:
+            if attempt == 2: raise
+            time.sleep(3 * (attempt + 1))
 
 def iso_from_location(loc):
     m = re.search(r"\(([^)]+)\)\s*$", (loc or "").strip())
@@ -99,8 +103,21 @@ def pull_skool(pages):
             f"https://www.skool.com/{COMMUNITY}/-/members?p={n}",
             headers={"Cookie": cookie, "User-Agent": UA,
                      "Accept": "text/html,application/xhtml+xml"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            html = resp.read().decode("utf-8", "replace")
+        # Skool intermittently stalls a page request. Without a retry one slow
+        # response killed the entire run, and a scheduled run that dies part-way
+        # leaves members in one CRM and not the other.
+        html = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    html = resp.read().decode("utf-8", "replace")
+                break
+            except Exception as e:
+                if attempt == 3:
+                    raise
+                wait = 3 * (attempt + 1)
+                print(f"  skool page {n} attempt {attempt+1} failed ({e}); retrying in {wait}s")
+                time.sleep(wait)
         m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.S)
         if not m:
             raise SystemExit(f"No __NEXT_DATA__ on page {n} - the Skool session has probably expired.")
