@@ -49,6 +49,39 @@ def _api(method, payload):
         return {"ok": False, "error": str(e)}
 
 
+# Skool shows a "Spam risk score" only while a join request is still PENDING; once a
+# member is approved it is gone from the page data, and this community's pending queue
+# is normally empty. So this is our own conservative check, not Skool's score - it only
+# fires on things that are near-certainly wrong, because a flag that cries wolf gets
+# ignored and then the real ones get ignored too.
+TYPO_DOMAINS = {
+    "gnail.com", "gmial.com", "gmai.com", "gmaill.com", "gmail.cm", "gmail.con",
+    "hotmial.com", "hotmai.com", "hotmail.con", "yahooo.com", "yaho.com", "yahoo.con",
+    "outlok.com", "outloo.com", "iclould.com", "iclod.com", "icloud.con", "aol.con",
+}
+DISPOSABLE_DOMAINS = {
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "tempmail.com",
+    "temp-mail.org", "yopmail.com", "trashmail.com", "sharklasers.com",
+    "throwawaymail.com", "getnada.com", "maildrop.cc", "dispostable.com",
+}
+
+
+def suspect_reason(m):
+    """Return a short reason string when a member looks like junk, else None."""
+    email = (m.get("email") or "").strip().lower()
+    if "@" not in email:
+        return None
+    domain = email.rsplit("@", 1)[1]
+    if domain in TYPO_DOMAINS:
+        return f"mistyped email domain ({domain})"
+    if domain in DISPOSABLE_DOMAINS:
+        return f"disposable email domain ({domain})"
+    name = f"{m.get('first') or ''} {m.get('last') or ''}".lower()
+    if "http://" in name or "https://" in name or ".com" in name:
+        return "name contains a URL"
+    return None
+
+
 def _fmt_source(src):
     """Turn Skool's raw attribution token into something a human reads."""
     if not src:
@@ -68,6 +101,7 @@ def _fmt_source(src):
 
 def _member_blocks(m, close_id=None, ghl_contact_id=None):
     name = f"{m.get('first') or ''} {m.get('last') or ''}".strip() or "(no name)"
+    suspect = suspect_reason(m)
     handle = m.get("handle") or ""
     email = m.get("email") or ""
     phone = m.get("phone") or m.get("phone_raw") or ""
@@ -83,12 +117,17 @@ def _member_blocks(m, close_id=None, ghl_contact_id=None):
     if loc:
         facts.append(f"*Location*  {loc}")
 
+    icon = "⚠️" if suspect else "🟢"
     blocks = [
         {"type": "header",
-         "text": {"type": "plain_text", "text": f"🟢  {name} joined the community", "emoji": True}},
+         "text": {"type": "plain_text", "text": f"{icon}  {name} joined the community", "emoji": True}},
         {"type": "section",
          "text": {"type": "mrkdwn", "text": "\n".join(facts)}},
     ]
+    if suspect:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+            "text": f"⚠️  *Looks like junk* — {suspect}. Synced anyway so nothing is lost; "
+                    f"tagged `skool-suspect` in GHL."}]})
 
     if why:
         quoted = "\n".join("> " + line for line in why.splitlines() if line.strip())
@@ -168,5 +207,18 @@ if __name__ == "__main__":
               "phone": "+15551234567", "handle": "sample-member",
               "source": "instagram.com", "location": "austin (united states)",
               "why": "I want to buy my first BRRRR property but I don't know where to start."}
+    if "--selftest" in sys.argv:
+        cases = [
+            ({"first":"Carter","last":"Glowacki","email":"carter.glowacki28@gnail.com"}, "typo"),
+            ({"first":"Real","last":"Person","email":"teddybear57718@gmail.com"}, None),
+            ({"first":"Sean","last":"Mackenzie","email":"seanmack575@gmail.com"}, None),
+            ({"first":"Temp","last":"User","email":"x@mailinator.com"}, "disposable"),
+            ({"first":"buy","last":"cheap.com","email":"a@gmail.com"}, "URL"),
+        ]
+        for c, expect in cases:
+            got = suspect_reason(c)
+            flag = "FLAG" if got else "ok  "
+            print(f"  {flag} {c['email']:36} -> {got}")
+        raise SystemExit
     ok = post_member(sample, close_id=None, ghl_contact_id=None) if "--post" in sys.argv else None
     print(json.dumps(_member_blocks(sample)[0], indent=2) if ok is None else f"posted: {ok}")

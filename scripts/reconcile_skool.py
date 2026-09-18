@@ -138,9 +138,13 @@ def main():
                {"id":CF["join_answer"],"value":m["why"] or ""},
                {"id":CF["phone_answer"],"value":m["phone_raw"] or ""}]
         if m["joined"]: cfs.append({"id":CF["joined"],"value":m["joined"][:10]})
+        tags = ["skool-member", "skool-free-community"]
+        if notify_slack.suspect_reason(m):
+            # Still created - a heuristic must never be the reason a real lead vanishes.
+            tags.append("skool-suspect")
         body = {"locationId":LOC,"firstName":m["first"] or "","lastName":m["last"] or "",
                 "email":m["email"],"source":f"Skool community ({m['source']})" if m["source"] else "Skool community",
-                "tags":["skool-member","skool-free-community"],"customFields":cfs}
+                "tags":tags,"customFields":cfs}
         if ph: body["phone"] = ph
         s, d = ghl("POST", "/contacts/upsert", body)
         c = (d.get("contact") or {})
