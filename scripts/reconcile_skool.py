@@ -59,6 +59,7 @@ def in_close(email):
     return (d.get("data") or [None])[0] if s == 200 else None
 
 _GHL_EMAILS = None
+_GHL_CONTACT_BY_EMAIL = {}
 def ghl_pipeline_emails():
     """Emails already carded in the GHL Skool pipeline.
 
@@ -74,8 +75,15 @@ def ghl_pipeline_emails():
         if s != 200: break
         ops = d.get("opportunities", [])
         for o in ops:
-            em = ((o.get("contact") or {}).get("email") or "").lower()
-            if em: emails.add(em)
+            c = o.get("contact") or {}
+            em = (c.get("email") or "").lower()
+            if em:
+                emails.add(em)
+                # Captured from the same response, at no extra cost, so the Slack post for
+                # a member who was ALREADY in GHL still carries an "Open in GHL" button.
+                # Previously only members created during that very run got one, which is
+                # the minority case once the 30-minute GHL pass has already run.
+                if c.get("id"): _GHL_CONTACT_BY_EMAIL[em] = c["id"]
         if len(ops) < 100: break
         page += 1
     _GHL_EMAILS = emails
@@ -83,6 +91,11 @@ def ghl_pipeline_emails():
 
 def in_ghl(email):
     return email.lower() in ghl_pipeline_emails()
+
+
+def ghl_contact_id(email):
+    ghl_pipeline_emails()
+    return _GHL_CONTACT_BY_EMAIL.get((email or "").lower())
 
 def main():
     pages = 2
@@ -212,7 +225,8 @@ def main():
     else:
         for m in pending:
             if notify_slack.post_member(m, close_id=close_lead[m["email"]]["id"],
-                                        ghl_contact_id=ghl_contact.get(m["email"])):
+                                        ghl_contact_id=ghl_contact.get(m["email"])
+                                                       or ghl_contact_id(m["email"])):
                 if not notify_slack.stamp_close(close, close_lead[m["email"]]["id"]):
                     print(f"  WARNING: stamp failed for {m['email']} - it will re-announce")
                 print(f"  slack announced {m['email']}")

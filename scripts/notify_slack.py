@@ -123,7 +123,20 @@ def _member_blocks(m, close_id=None, ghl_contact_id=None):
     suspect = suspect_reason(m)
     handle = m.get("handle") or ""
     email = m.get("email") or ""
-    phone = m.get("phone") or m.get("phone_raw") or ""
+    # Skool's phone question is free text, so phone_raw is regularly prose
+    # ("I live in our side the states"). Wrapping that in a tel: link produced an
+    # unclickable, nonsense phone line. Only a genuinely parseable number becomes a
+    # tel: link; anything else is shown as what it is - an answer, not a number.
+    phone = m.get("phone") or ""
+    phone_note = ""
+    if not phone and m.get("phone_raw"):
+        try:
+            from skool_to_ghl import clean_phone, iso_from_location
+            phone = clean_phone(m["phone_raw"], iso_from_location(m.get("location"))) or ""
+        except Exception:
+            phone = ""
+        if not phone:
+            phone_note = str(m["phone_raw"]).strip()
     why = (m.get("why") or "").strip()
     loc = m.get("location") or ""
 
@@ -132,6 +145,8 @@ def _member_blocks(m, close_id=None, ghl_contact_id=None):
         facts.append(f"*Email*  <mailto:{email}|{email}>")
     if phone:
         facts.append(f"*Phone*  <tel:{phone}|{phone}>")
+    elif phone_note:
+        facts.append(f"*Phone answer*  _{phone_note[:120]}_  (not a dialable number)")
     facts.append(f"*Found us via*  {_fmt_source(m.get('source'))}")
     if loc:
         facts.append(f"*Location*  {loc}")
