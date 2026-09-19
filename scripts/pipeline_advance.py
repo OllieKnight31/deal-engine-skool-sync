@@ -24,6 +24,7 @@ Usage:
     pipeline_advance.py --apply
     pipeline_advance.py --stale-days 21 --apply
     pipeline_advance.py --apply --max-moves 50 # cap a first run
+    pipeline_advance.py --repair-urls --apply  # stamp missing Skool Profile URLs first
 """
 import json, os, re, sys, time, base64, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone
@@ -139,6 +140,33 @@ def move_ghl(opp_id, stage_id):
                                                    "pipelineStageId": stage_id})
 
 
+def repair_profile_urls(leads_by_id, by_email, apply):
+    """Stamp `Skool Profile URL` onto Close leads that lack it.
+
+    Departure detection keys on the Skool handle, which lives in that field - but leads the
+    old Zap created never had it mapped, so 232 of 275 cards were unmatchable and the whole
+    feature only worked for 16% of the board. Matching email -> handle against the live
+    member list fills it in.
+    """
+    fixed = matched = 0
+    for lid, lead in leads_by_id.items():
+        if lead.get(f"custom.{CF_CLOSE_URL}"):
+            continue
+        emails = []
+        for c in (lead.get("contacts") or []):
+            emails += [(e.get("email") or "").lower().strip() for e in (c.get("emails") or [])]
+        m = next((by_email[e] for e in emails if e in by_email), None)
+        if not m or not m.get("handle"):
+            continue
+        matched += 1
+        if apply:
+            s, _ = close("PUT", f"/lead/{lid}/",
+                         {f"custom.{CF_CLOSE_URL}": f"https://www.skool.com/@{m['handle']}"})
+            if s == 200: fixed += 1
+    print(f"profile URLs: {matched} matchable from the live member list, {fixed} written")
+    return fixed
+
+
 def main():
     apply = "--apply" in sys.argv
     stale_days = int(sys.argv[sys.argv.index("--stale-days") + 1]) if "--stale-days" in sys.argv else 21
@@ -157,6 +185,12 @@ def main():
     print("reading GHL cards…")
     ghl_cards = ghl_cards_by_email()
     print(f"  moveable GHL cards: {len(ghl_cards)}\n")
+
+    if "--repair-urls" in sys.argv:
+        repair_profile_urls(leads, by_email, apply)
+        if not apply:
+            print("\nreport only — rerun with --apply to write them")
+        return
 
     now = datetime.now(timezone.utc)
     left, stale, unknown = [], [], 0
