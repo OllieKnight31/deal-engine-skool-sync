@@ -39,7 +39,11 @@ LAST_TOTAL_PAGES = None
 try:
     import phonenumbers
 except ImportError:
-    phonenumbers = None
+    # Previously this set phonenumbers = None and clean_phone() then returned None for
+    # EVERY answer - silently discarding every phone number while reporting success.
+    # Fail loudly instead.
+    sys.exit("FATAL: phonenumbers is not installed, so every phone number would be "
+             "silently dropped.  pip install phonenumbers")
 
 COUNTRY_TO_ISO = {
  "united states":"US","united kingdom":"GB","canada":"CA","australia":"AU","india":"IN",
@@ -59,7 +63,9 @@ def ghl(method, path, payload=None, base="https://services.leadconnectorhq.com")
         data=json.dumps(payload).encode() if payload is not None else None, method=method,
         headers={"Authorization": f"Bearer {PIT}", "Version": "2021-07-28",
                  "Content-Type": "application/json", "Accept": "application/json",
-                 "User-Agent": "curl/8.7.1"})
+                 "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/153.0.0.0 Safari/537.36")})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
@@ -97,9 +103,19 @@ def pull_skool(pages):
     cookie = os.environ.get("SKOOL_COOKIE")
     if not cookie:
         tok, cid = os.environ.get("SKOOL_AUTH_TOKEN"), os.environ.get("SKOOL_CLIENT_ID")
-        if not tok:
-            raise SystemExit("Set SKOOL_COOKIE, or SKOOL_AUTH_TOKEN + SKOOL_CLIENT_ID.")
-        cookie = f"auth_token={tok}" + (f"; client_id={cid}" if cid else "")
+        if tok:
+            cookie = f"auth_token={tok}" + (f"; client_id={cid}" if cid else "")
+    if not cookie:
+        # Fall back to the on-disk credential so this can run unattended from launchd,
+        # where there is no shell profile to export secrets from.
+        # Refresh it with:  automations/scripts/skool_cookie_from_disk.py
+        secret = os.environ.get("SKOOL_COOKIE_FILE") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".secrets", "skool_cookie")
+        if os.path.exists(secret):
+            cookie = open(secret).read().strip()
+    if not cookie:
+        raise SystemExit("No Skool cookie. Set SKOOL_COOKIE / SKOOL_AUTH_TOKEN, or run "
+                         "automations/scripts/skool_cookie_from_disk.py")
     UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
     out, n = [], 1
@@ -187,6 +203,7 @@ def main():
     print(f"  no email at all  : {len(members)-len(withmail)-len(badmail)}\n")
 
     created = carded = skipped = 0
+    already = card_failed = 0
     for m in withmail:
         iso  = iso_from_location(m["location"])
         ph   = clean_phone(m["phone_raw"], iso)
@@ -211,10 +228,24 @@ def main():
             so, od = ghl("POST", "/opportunities/", {"pipelineId":PIPE, "locationId":LOC,
                 "pipelineStageId":STAGE, "name":f"{name} — Skool free community",
                 "status":"open", "contactId":c["id"], "monetaryValue":0})
-            if so in (200,201): carded += 1
-            else: print(f"  card failed {name}: {so} {str(od)[:120]}")
+            if so in (200,201):
+                carded += 1
+            elif (od or {}).get("code") == "OPPORTUNITY_NO_DUPLICATE":
+                # Not a failure: GHL allows one open opportunity per contact per pipeline,
+                # so this means the contact is already carded here - usually two Skool
+                # members collapsing onto one GHL contact via a shared phone number.
+                already += 1
+            else:
+                # Counted, not just printed. A card failure used to be printed and then
+                # reported as "0 failed" in the summary - a real loss dressed as success.
+                card_failed += 1
+                print(f"  CARD FAILED {name}: {so} {str(od)[:120]}")
     if apply_changes:
-        print(f"\nAPPLIED: {created} contacts upserted, {carded} new pipeline cards, {skipped} failed.")
+        print(f"\nAPPLIED: {created} contacts upserted, {carded} new pipeline cards, "
+              f"{already} already carded, {skipped + card_failed} failed.")
+        if skipped or card_failed:
+            # Non-zero exit so launchd/CI and the health check see a bad run as bad.
+            sys.exit(f"{skipped} contact failure(s), {card_failed} card failure(s) - see above")
     else:
         print("\nDRY RUN - rerun with --apply to write to GoHighLevel.")
 
