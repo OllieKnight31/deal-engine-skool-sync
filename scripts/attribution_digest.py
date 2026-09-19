@@ -95,9 +95,9 @@ def main():
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines) or "_no joins_"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Top sources*\n{detail}"}},
     ]
-    r = notify_slack._api("chat.postMessage", {
+    r = notify_slack._api("chat.postMessage", notify_slack._identity({
         "channel": notify_slack.SLACK_CHANNEL,
-        "text": f"{n} new community members in {days} days", "blocks": blocks})
+        "text": f"{n} new community members in {days} days", "blocks": blocks}))
     print("posted" if r.get("ok") else f"post failed: {r.get('error')}")
 
 

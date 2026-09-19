@@ -1,0 +1,65 @@
+name: Skool maintenance
+
+# Slower jobs that do not belong in the 5-minute sync loop:
+#   - pipeline hygiene, which needs the FULL 60-page member list to spot departures
+#   - the weekly attribution digest
+# Both are safe to miss a run, so an ordinary daily/weekly cron is fine here - unlike the
+# lead sync, where GitHub's dropped schedules actually cost you speed-to-lead.
+on:
+  schedule:
+    - cron: "20 6 * * *"      # daily  06:20 UTC - pipeline hygiene
+    - cron: "0 8 * * 1"       # Monday 08:00 UTC - attribution digest
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run on demand"
+        type: choice
+        options: [both, hygiene, digest]
+        default: both
+
+jobs:
+  hygiene:
+    # daily cron, or a manual run asking for it
+    if: github.event.schedule == '20 6 * * *' || github.event_name == 'workflow_dispatch' && (inputs.job == 'both' || inputs.job == 'hygiene')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      # Moves cards out of "New Member": members who left Skool -> Not A Fit / Left,
+      # and cards >= 21 days old whose member has zero community points -> Unresponsive.
+      # Matched on Skool handle, not email, so the Apr-Aug back catalogue is not
+      # mistaken for departures. Capped so a bad day cannot rewrite the whole board.
+      - name: Pipeline hygiene
+        env:
+          SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:   ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:         ${{ secrets.GHL_PIT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+        run: |
+          # Stamp Skool Profile URLs first - departure detection keys on the handle, and
+          # leads the old Zap created never had that field mapped. Without this the sweep
+          # silently only covers the minority of the board that happens to carry one.
+          python scripts/pipeline_advance.py --repair-urls --apply
+          python scripts/pipeline_advance.py --apply --stale-days 21 --max-moves 150
+
+  digest:
+    if: github.event.schedule == '0 8 * * 1' || github.event_name == 'workflow_dispatch' && (inputs.job == 'both' || inputs.job == 'digest')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: Weekly attribution digest
+        env:
+          SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:   ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:         ${{ secrets.GHL_PIT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+        run: python scripts/attribution_digest.py --days 7 --post

@@ -24,7 +24,16 @@ import json, os, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
-SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "C0C2WAXFH50")   # #1-de-community-joins
+SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "C0C2WAXFH50")   # #5-community-joins
+# Always address the channel by ID, never by name: this channel has already been renamed once
+# (#1-de-community-joins -> #5-community-joins on 18 Sept) and a name-based config would have
+# broken silently. The ID is stable across renames.
+
+# The posting app is the shared "Workspace Builder" bot, which is the wrong name to see beside
+# a lead alert. chat:write.customize lets each message carry its own identity without needing a
+# second Slack app.
+POST_AS = os.environ.get("SLACK_POST_AS", "Deal Engine")
+POST_ICON = os.environ.get("SLACK_POST_ICON", ":house:")
 # The community takes ~43 joins/day, so a 4-hour scheduler gap accumulates ~7 members.
 # A threshold of 8 would therefore digest ordinary traffic, when the ask was a message
 # per member. 25 only trips on a genuine backfill.
@@ -34,6 +43,13 @@ CF_SLACK_NOTIFIED = "cf_qpVKHQiE9jsZAkUIOvGlN1quL7m0uFZAPFOBE19jhCy"
 GHL_LOCATION = "2RrjNuz0M4MTFlxpW37k"
 
 enabled = bool(SLACK_TOKEN)
+
+
+def _identity(payload):
+    """Stamp every outgoing message with the Deal Engine identity."""
+    payload.setdefault("username", POST_AS)
+    payload.setdefault("icon_emoji", POST_ICON)
+    return payload
 
 
 def _api(method, payload):
@@ -163,8 +179,8 @@ def post_member(m, close_id=None, ghl_contact_id=None):
     if not enabled:
         return False
     blocks, fallback = _member_blocks(m, close_id, ghl_contact_id)
-    r = _api("chat.postMessage", {"channel": SLACK_CHANNEL, "text": fallback,
-                                  "blocks": blocks, "unfurl_links": False})
+    r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL, "text": fallback,
+                                            "blocks": blocks, "unfurl_links": False}))
     if not r.get("ok"):
         print(f"  slack post failed for {m.get('email')}: {r.get('error')}")
     return bool(r.get("ok"))
@@ -179,7 +195,7 @@ def post_digest(members, reason="backfill"):
         name = f"{m.get('first') or ''} {m.get('last') or ''}".strip() or "(no name)"
         lines.append(f"• *{name}* — {m.get('email','')} — via {_fmt_source(m.get('source'))}")
     more = f"\n…and {len(members)-50} more" if len(members) > 50 else ""
-    r = _api("chat.postMessage", {
+    r = _api("chat.postMessage", _identity({
         "channel": SLACK_CHANNEL,
         "text": f"{len(members)} new community members ({reason})",
         "blocks": [
@@ -189,7 +205,7 @@ def post_digest(members, reason="backfill"):
              "text": f"Posted as a digest rather than {len(members)} separate messages ({reason})."}]},
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines) + more}},
         ],
-        "unfurl_links": False})
+        "unfurl_links": False}))
     if not r.get("ok"):
         print(f"  slack digest failed: {r.get('error')}")
     return bool(r.get("ok"))
@@ -249,6 +265,7 @@ def post_alert(title, detail="", mention=False):
         "text": "New community members are *not* reaching the CRMs or this channel until this is fixed. "
                 "Most likely cause: the Skool session cookie was invalidated by a password change — "
                 "rotate the `SKOOL_COOKIE` repo secret."}]})
-    r = _api("chat.postMessage", {"channel": SLACK_CHANNEL,
-                                  "text": f"Skool sync problem: {title}", "blocks": blocks})
+    r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL,
+                                            "text": f"Skool sync problem: {title}",
+                                            "blocks": blocks}))
     return bool(r.get("ok"))
