@@ -177,8 +177,12 @@ def main():
         # still a member: is the card stale and the member inactive?
         m = by_email.get(email) if email else None
         pts = (m or {}).get("points") or 0
+        # Age off the SKOOL JOIN DATE, not the card's creation date. A backfilled card is
+        # created today for someone who joined in April - measuring the card would reset
+        # everyone's clock to zero every time we repair the pipeline.
+        stamp = (m or {}).get("joined") or o.get("date_created") or ""
         try:
-            age = (now - datetime.fromisoformat(o["date_created"].replace("Z", "+00:00"))).days
+            age = (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).days
         except Exception:
             age = 0
         if age >= stale_days and pts == 0:
@@ -191,7 +195,7 @@ def main():
     if len(left) > 15: print(f"   …and {len(left)-15} more")
     print(f"\nSTALE >= {stale_days}d AND 0 points : {len(stale)}")
     for r in stale[:15]:
-        print(f"   {r['name']:32} card {r['age']}d old")
+        print(f"   {r['name']:32} joined {r['age']}d ago, 0 points")
     if len(stale) > 15: print(f"   …and {len(stale)-15} more")
     print(f"\nno profile URL, skipped   : {unknown}")
 
