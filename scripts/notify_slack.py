@@ -212,11 +212,16 @@ def post_digest(members, reason="backfill"):
 
 
 def stamp_close(close_fn, lead_id):
-    """Mark the Close lead as notified so no later run posts it again."""
+    """Mark the Close lead as notified so no later run posts it again.
+
+    Returns True only when Close confirmed the write. A silent failure here means the
+    member gets announced again on the next pass, so the caller needs to know.
+    """
     if not lead_id:
-        return
+        return False
     now = datetime.now(timezone.utc).isoformat()
-    close_fn("PUT", f"/lead/{lead_id}/", {f"custom.{CF_SLACK_NOTIFIED}": now})
+    status, _ = close_fn("PUT", f"/lead/{lead_id}/", {f"custom.{CF_SLACK_NOTIFIED}": now})
+    return status == 200
 
 
 def already_notified(lead):

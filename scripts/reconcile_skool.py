@@ -41,6 +41,16 @@ def close(method, path, payload=None):
             if attempt == 2: raise
             time.sleep(3 * (attempt + 1))
 
+def lead_by_id(lead_id):
+    """Immediately-consistent read. Close's SEARCH index lags writes by minutes, so the
+    Slack-notified stamp written on one pass is still absent from search results on the
+    next - which announced 26 members twice on 19 Sept. Fetching the lead by id is
+    strongly consistent, so it is the only safe way to answer "have we told the team?".
+    """
+    s, d = close("GET", f"/lead/{lead_id}/?_fields=id,display_name,custom")
+    return d if s == 200 else None
+
+
 def in_close(email):
     q = urllib.parse.quote(f'email:"{email}"')
     # "custom" pulls every custom field back as custom.cf_<id> keys - needed so we
@@ -170,8 +180,23 @@ def main():
             print("\nslack: SLACK_BOT_TOKEN not set - notifications skipped")
         return
 
-    pending = [m for m in valid
-               if close_lead.get(m["email"]) and not notify_slack.already_notified(close_lead[m["email"]])]
+    candidates = [m for m in valid
+                  if close_lead.get(m["email"]) and not notify_slack.already_notified(close_lead[m["email"]])]
+    # Re-check every candidate against a consistent read before announcing. Only candidates
+    # need it, so this costs one extra GET per genuinely-new member rather than per member.
+    pending = []
+    for m in candidates:
+        lead_id = close_lead[m["email"]]["id"]
+        fresh = lead_by_id(lead_id)
+        if fresh is None:
+            print(f"  could not re-read {m['email']} - skipping rather than risk a duplicate")
+            continue
+        if notify_slack.already_notified(fresh):
+            continue          # stale search result; the team already knows
+        pending.append(m)
+    skipped = len(candidates) - len(pending)
+    if skipped:
+        print(f"slack: {skipped} candidate(s) were already announced (stale search index)")
     if not pending:
         print("\nslack: nothing new to announce")
         return
@@ -180,13 +205,16 @@ def main():
         ok = notify_slack.post_digest(pending, reason=f"{len(pending)} at once, likely a backfill")
         print(f"\nslack: digest of {len(pending)} members -> {ok}")
         if ok:
-            for m in pending:
-                notify_slack.stamp_close(close, close_lead[m['email']]['id'])
+            bad = [m["email"] for m in pending
+                   if not notify_slack.stamp_close(close, close_lead[m["email"]]["id"])]
+            if bad:
+                print(f"  WARNING: {len(bad)} stamp(s) failed, these will re-announce: {bad[:5]}")
     else:
         for m in pending:
             if notify_slack.post_member(m, close_id=close_lead[m["email"]]["id"],
                                         ghl_contact_id=ghl_contact.get(m["email"])):
-                notify_slack.stamp_close(close, close_lead[m["email"]]["id"])
+                if not notify_slack.stamp_close(close, close_lead[m["email"]]["id"]):
+                    print(f"  WARNING: stamp failed for {m['email']} - it will re-announce")
                 print(f"  slack announced {m['email']}")
 
 if __name__ == "__main__":
