@@ -43,6 +43,7 @@ def bucket(src):
 
 def main():
     days = int(sys.argv[sys.argv.index("--days") + 1]) if "--days" in sys.argv else 7
+    period = "24 hours" if days == 1 else f"{days} days"
     post = "--post" in sys.argv
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -88,7 +89,7 @@ def main():
     detail = "\n".join(f"• {k} — {v}" for k, v in srcs.most_common(8))
     blocks = [
         {"type": "header", "text": {"type": "plain_text",
-         "text": f"📊  {n} new community members in {days} days", "emoji": True}},
+         "text": f"📊  {n} new community members in the last {period}", "emoji": True}},
         {"type": "context", "elements": [{"type": "mrkdwn",
          "text": f"Community now *{total}* · *{with_email}* of the {n} left a usable email"
                  f" · *{engaged}* are already posting or commenting"}]},
@@ -97,7 +98,7 @@ def main():
     ]
     r = notify_slack._api("chat.postMessage", notify_slack._identity({
         "channel": notify_slack.SLACK_CHANNEL,
-        "text": f"{n} new community members in {days} days", "blocks": blocks}))
+        "text": f"{n} new community members in the last {period}", "blocks": blocks}))
     print("posted" if r.get("ok") else f"post failed: {r.get('error')}")
 
 
