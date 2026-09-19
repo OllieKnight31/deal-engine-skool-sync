@@ -31,6 +31,11 @@ CF = {"profile_url":"o8wRnHF4dKwgr9qttHkd",
       "phone_answer":"fpobnLVtWxDEfhmvXVF8"}
 COMMUNITY = "portfolio-lab"
 
+# Set by pull_skool() from Skool's own pageProps, so a caller can report the true
+# community size without paging the whole member list.
+LAST_TOTAL = None
+LAST_TOTAL_PAGES = None
+
 try:
     import phonenumbers
 except ImportError:
@@ -125,9 +130,22 @@ def pull_skool(pages):
         for u in pp.get("users", []):
             mem = u.get("member") or {}
             md  = mem.get("metadata") or {}
+            # Engagement signal lives on the USER's metadata, not the member's:
+            # spData = {"pts": points, "lv": level, "role": n}. A member with points has
+            # actually posted/commented/liked, which is a far warmer lead than a drive-by
+            # joiner - and nothing in this stack was using it.
+            umd = u.get("metadata") or {}
+            try:
+                sp = json.loads(umd.get("spData") or "{}")
+            except Exception:
+                sp = {}
+            # lastOffline is a NANOSECOND epoch; seconds is what everything else wants.
+            lo = umd.get("lastOffline")
+            last_seen = int(lo) // 1_000_000_000 if isinstance(lo, (int, float)) and lo else None
             rec = {"handle":u.get("name"), "first":u.get("firstName"), "last":u.get("lastName"),
                    "joined":mem.get("createdAt"), "source":md.get("attrSrcComp"),
-                   "location":md.get("requestLocation"), "email":None, "phone_raw":None, "why":None}
+                   "location":md.get("requestLocation"), "email":None, "phone_raw":None, "why":None,
+                   "points":sp.get("pts") or 0, "level":sp.get("lv") or 1, "last_seen":last_seen}
             sv = md.get("survey")
             if sv:
                 try:
@@ -142,6 +160,9 @@ def pull_skool(pages):
                 except Exception:
                     pass
             out.append(rec)
+        global LAST_TOTAL, LAST_TOTAL_PAGES
+        LAST_TOTAL = pp.get("total", LAST_TOTAL)
+        LAST_TOTAL_PAGES = pp.get("totalPages", LAST_TOTAL_PAGES)
         total = pp.get("totalPages", n)
         if n >= total: break
         n += 1

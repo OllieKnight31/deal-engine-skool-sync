@@ -25,7 +25,10 @@ from datetime import datetime, timezone
 
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "C0C2WAXFH50")   # #1-de-community-joins
-NOTIFY_MAX = int(os.environ.get("SLACK_NOTIFY_MAX", "8"))
+# The community takes ~43 joins/day, so a 4-hour scheduler gap accumulates ~7 members.
+# A threshold of 8 would therefore digest ordinary traffic, when the ask was a message
+# per member. 25 only trips on a genuine backfill.
+NOTIFY_MAX = int(os.environ.get("SLACK_NOTIFY_MAX", "25"))
 
 CF_SLACK_NOTIFIED = "cf_qpVKHQiE9jsZAkUIOvGlN1quL7m0uFZAPFOBE19jhCy"
 GHL_LOCATION = "2RrjNuz0M4MTFlxpW37k"
@@ -116,6 +119,10 @@ def _member_blocks(m, close_id=None, ghl_contact_id=None):
     facts.append(f"*Found us via*  {_fmt_source(m.get('source'))}")
     if loc:
         facts.append(f"*Location*  {loc}")
+    pts = m.get("points") or 0
+    if pts:
+        facts.append(f"*Engagement*  🔥 {pts} point{'s' if pts != 1 else ''} in the community "
+                     f"(level {m.get('level') or 1}) — warmer than a drive-by joiner")
 
     icon = "⚠️" if suspect else "🟢"
     blocks = [
@@ -222,3 +229,26 @@ if __name__ == "__main__":
         raise SystemExit
     ok = post_member(sample, close_id=None, ghl_contact_id=None) if "--post" in sys.argv else None
     print(json.dumps(_member_blocks(sample)[0], indent=2) if ok is None else f"posted: {ok}")
+
+
+def post_alert(title, detail="", mention=False):
+    """Loud failure alarm. Nobody watches the Actions tab, so a broken sync has to
+    come and find someone - otherwise it looks identical to a quiet week."""
+    if not enabled:
+        print(f"ALERT (slack disabled): {title} — {detail}")
+        return False
+    head = ("<!channel> " if mention else "") + f"*{title}*"
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "🚨  Skool sync problem", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": head}},
+    ]
+    if detail:
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": f"```{str(detail)[:2500]}```"}})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+        "text": "New community members are *not* reaching the CRMs or this channel until this is fixed. "
+                "Most likely cause: the Skool session cookie was invalidated by a password change — "
+                "rotate the `SKOOL_COOKIE` repo secret."}]})
+    r = _api("chat.postMessage", {"channel": SLACK_CHANNEL,
+                                  "text": f"Skool sync problem: {title}", "blocks": blocks})
+    return bool(r.get("ok"))

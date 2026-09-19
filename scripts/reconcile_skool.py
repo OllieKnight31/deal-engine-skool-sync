@@ -85,6 +85,13 @@ def main():
     valid = [m for m in members if m["email"] and EMAIL_RE.match(m["email"])]
     print(f"skool members checked: {len(members)} | with valid email: {len(valid)}\n")
 
+    # Zero members from a community with ~1,800 of them means the read is broken, not that
+    # nobody joined. Left unchecked this fails *silently* - a green run that syncs nothing.
+    if not members:
+        notify_slack.post_alert("Skool returned zero members",
+                                f"Pulled {pages} page(s) and got nothing back.", mention=True)
+        raise SystemExit("Skool returned no members - aborting rather than reporting success")
+
     # Keep the Close lead we found for each member. It carries the "Slack Notified At"
     # stamp, which is what stops the team being pinged twice about the same person.
     close_lead = {}
@@ -183,4 +190,15 @@ def main():
                 print(f"  slack announced {m['email']}")
 
 if __name__ == "__main__":
-    main()
+    # Any unhandled failure is announced before it propagates. The job still exits
+    # non-zero so CI goes red too - Slack is the alarm, the exit code is the record.
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (0, None):
+            notify_slack.post_alert("Skool sync aborted", e.code, mention=True)
+        raise
+    except Exception:
+        import traceback
+        notify_slack.post_alert("Skool sync crashed", traceback.format_exc()[-2000:], mention=True)
+        raise
