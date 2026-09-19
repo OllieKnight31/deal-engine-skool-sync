@@ -1,20 +1,33 @@
 name: Skool sync
 
-# Keeps Close and GoHighLevel in step with the Skool free community.
-# Runs on a schedule so it does not depend on anyone's laptop being awake.
+# Keeps Close and GoHighLevel in step with the Skool free community, and tells the
+# team in Slack about every new member. No server, no browser, no laptop.
+#
+# WHY THE HOURLY CRON AND THE INTERNAL LOOP
+# A "*/10" schedule produced exactly ONE run in 5h40m on 18 Sept - GitHub openly
+# de-prioritises and drops short-interval schedules. Hourly schedules are honoured far
+# more reliably, so the cron fires once an hour and the job then loops internally every
+# 5 minutes for ~55 minutes. That gives genuine 5-minute coverage with no third-party
+# scheduler, no extra token, and no cost (public repos get unlimited Actions minutes).
+#
+# If you would rather drive it externally instead, delete the loop, set the cron back to
+# "*/5 * * * *" as a fallback, and POST every 5 minutes from any cron service to:
+#   https://api.github.com/repos/OllieKnight31/deal-engine-skool-sync/actions/workflows/sync.yml/dispatches
+#   -H "Authorization: Bearer <fine-grained PAT with Actions: read+write on this repo>"
+#   -H "Accept: application/vnd.github+json"   -d '{"ref":"main"}'
 on:
   schedule:
-    - cron: "*/10 * * * *"     # every 10 minutes
-  workflow_dispatch:            # and on demand from the Actions tab
+    - cron: "7 * * * *"       # hourly, offset off the hour (the busiest minute for GitHub)
+  workflow_dispatch:
 
 concurrency:
   group: skool-sync
-  cancel-in-progress: false     # never let two runs write at once
+  cancel-in-progress: false   # never let two runs write at once
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
 
@@ -25,22 +38,36 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # 1. Anything in Skool that never reached a CRM gets created in both.
-      #    This is the safety net: it catches a rejected field, a bad email,
-      #    an expired Zapier connection, a task-limit halt, or the Zap being off.
-      - name: Reconcile Skool -> Close + GoHighLevel
+      # Every 5 minutes for ~55 minutes:
+      #   1. anything in Skool missing from either CRM is created in both, and anyone
+      #      genuinely new is announced in Slack (#1-de-community-joins)
+      #   2. valid free-text phone answers are promoted into Close's phone field and
+      #      mangled "+1..." numbers repaired
+      #
+      # A failing iteration does not stop the loop - the next one retries, and every
+      # write is idempotent - but the job still ends red so a real breakage is loud
+      # rather than silently syncing nothing.
+      - name: Sync loop
         env:
-          SKOOL_COOKIE:   ${{ secrets.SKOOL_COOKIE }}
-          CLOSE_API_KEY:  ${{ secrets.CLOSE_API_KEY }}
-          GHL_PIT:        ${{ secrets.GHL_PIT }}
-        run: python scripts/reconcile_skool.py --pages 3 --fix
-
-      # 2. Promote valid free-text phone answers into Close's real phone field,
-      #    and repair numbers Close mangled with a "+1" prefix.
-      - name: Normalise phone numbers in Close
-        env:
-          SKOOL_COOKIE:   ${{ secrets.SKOOL_COOKIE }}
-          CLOSE_API_KEY:  ${{ secrets.CLOSE_API_KEY }}
-          GHL_PIT:        ${{ secrets.GHL_PIT }}
-          SKOOL_PAGES:    "3"
-        run: python scripts/close_phone_normalise.py --apply
+          SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:   ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:         ${{ secrets.GHL_PIT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+          SKOOL_PAGES:     "3"
+        run: |
+          set -u
+          END=$(( $(date +%s) + 55*60 ))
+          FAILED=0
+          PASS=0
+          while :; do
+            PASS=$((PASS+1))
+            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)"
+            python scripts/reconcile_skool.py --pages 3 --fix     || { FAILED=1; echo "reconcile failed"; }
+            python scripts/close_phone_normalise.py --apply       || { FAILED=1; echo "normalise failed"; }
+            echo "::endgroup::"
+            [ "$(date +%s)" -ge "$END" ] && break
+            sleep 300
+          done
+          echo "completed $PASS passes"
+          exit $FAILED
