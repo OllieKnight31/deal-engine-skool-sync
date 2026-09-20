@@ -8,8 +8,17 @@ without depending on Zapier reporting anything.
 
 Usage:  reconcile_skool.py [--pages N] [--fix]
         --fix backfills whatever is missing (Close and GHL).
+
+One thing this deliberately does NOT do is fight GoHighLevel's deduper. Two Skool
+accounts can share a phone number - the same person joining twice - and GHL then
+collapses both onto ONE contact, whose email is simply whichever upsert ran last.
+Presence here is keyed on email, so the member who did not win the contact looked
+missing on every single pass and was rewritten forever, which also meant
+"MISSING FROM GHL: 0" could never happen and the number was worthless as a health
+signal. Those members are now detected, reported under their own heading, and left
+alone. Nothing is merged or deleted - there are two real people-records behind it.
 """
-import json, re, sys, os, time, base64, urllib.request, urllib.error, urllib.parse
+import json, re, sys, os, time, base64, datetime, urllib.request, urllib.error, urllib.parse
 
 sys.path.insert(0, os.path.dirname(__file__))
 from skool_to_ghl import (pull_skool, ghl, clean_phone, iso_from_location, EMAIL_RE,
@@ -58,8 +67,38 @@ def in_close(email):
     s, d = close("GET", f"/lead/?query={q}&_limit=1&_fields=id,display_name,custom")
     return (d.get("data") or [None])[0] if s == 200 else None
 
+# ---- collapsed-contact state -------------------------------------------------
+# GitHub Actions starts from a clean checkout every run, so this file is an
+# optimisation and a record, never the source of truth. The authoritative signal is
+# rebuilt live from the pipeline on every run (see collapsed_onto), so a missing
+# state file changes nothing except the wording of the first report.
+STATE_FILE = os.environ.get("SKOOL_COLLISION_STATE") or os.path.join(
+    os.path.expanduser("~"), ".local", "state", "dealengine", "skool_ghl_collisions.json")
+
+
+def load_collisions():
+    try:
+        with open(STATE_FILE) as fh:
+            return json.load(fh).get("collisions", {})
+    except Exception:
+        return {}
+
+
+def save_collisions(collisions):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as fh:
+            json.dump({"collisions": collisions}, fh, indent=1, sort_keys=True)
+    except Exception as e:
+        # Never fail a sync over a cache file.
+        print(f"  note: could not write {STATE_FILE} ({e}) - collisions are still "
+              f"detected live, just not remembered between runs")
+
+
 _GHL_EMAILS = None
 _GHL_CONTACT_BY_EMAIL = {}
+_GHL_EMAIL_BY_CONTACT = {}
+_GHL_CONTACT_BY_PHONE = {}
 def ghl_pipeline_emails():
     """Emails already carded in the GHL Skool pipeline.
 
@@ -77,13 +116,20 @@ def ghl_pipeline_emails():
         for o in ops:
             c = o.get("contact") or {}
             em = (c.get("email") or "").lower()
+            cid = c.get("id")
+            # The phone on the carded contact is what GHL actually deduped on, so it is
+            # also the durable evidence that a second Skool account collapsed onto it.
+            # It costs nothing here and needs no state file to survive a fresh checkout.
+            ph = (c.get("phone") or "").strip()
+            if cid and ph: _GHL_CONTACT_BY_PHONE.setdefault(ph, cid)
+            if cid and em: _GHL_EMAIL_BY_CONTACT[cid] = em
             if em:
                 emails.add(em)
                 # Captured from the same response, at no extra cost, so the Slack post for
                 # a member who was ALREADY in GHL still carries an "Open in GHL" button.
                 # Previously only members created during that very run got one, which is
                 # the minority case once the 30-minute GHL pass has already run.
-                if c.get("id"): _GHL_CONTACT_BY_EMAIL[em] = c["id"]
+                if cid: _GHL_CONTACT_BY_EMAIL[em] = cid
         if len(ops) < 100: break
         page += 1
     _GHL_EMAILS = emails
@@ -93,9 +139,36 @@ def in_ghl(email):
     return email.lower() in ghl_pipeline_emails()
 
 
-def ghl_contact_id(email):
+def collapsed_onto(email, phone):
+    """(contact_id, owner_email) when GHL has already folded this member into an
+    existing carded contact - otherwise None.
+
+    Recognised by the phone number, because that is what GHL dedupes on: the member's
+    email is absent from the pipeline, but their number is already on a card belonging
+    to a DIFFERENT email. Creating them again is impossible (GHL returns the same
+    contact and refuses a second open card in the same pipeline), so the only useful
+    thing to do is recognise it, report it, and leave both records alone.
+    """
     ghl_pipeline_emails()
-    return _GHL_CONTACT_BY_EMAIL.get((email or "").lower())
+    email = (email or "").lower()
+    if not phone or not email or email in _GHL_EMAILS:
+        return None
+    cid = _GHL_CONTACT_BY_PHONE.get(phone)
+    if not cid:
+        return None
+    owner = _GHL_EMAIL_BY_CONTACT.get(cid, "")
+    return (cid, owner) if owner and owner != email else None
+
+
+def ghl_contact_id(email, collisions=None):
+    ghl_pipeline_emails()
+    cid = _GHL_CONTACT_BY_EMAIL.get((email or "").lower())
+    if cid:
+        return cid
+    # A collapsed member has no contact of their own; link to the one they landed on
+    # so the Slack card still opens something real.
+    rec = (collisions or {}).get((email or "").lower())
+    return rec.get("contact_id") if rec else None
 
 def main():
     pages = 2
@@ -117,13 +190,31 @@ def main():
 
     # Keep the Close lead we found for each member. It carries the "Slack Notified At"
     # stamp, which is what stops the team being pinged twice about the same person.
+    collisions = load_collisions()
     close_lead = {}
-    miss_close, miss_ghl = [], []
+    miss_close, miss_ghl, collapsed = [], [], []
     for m in valid:
         lead = in_close(m["email"])
         close_lead[m["email"]] = lead
         if not lead: miss_close.append(m)
-        if not in_ghl(m["email"]): miss_ghl.append(m)
+        if in_ghl(m["email"]):
+            # They have their own contact after all - drop any stale collision record.
+            collisions.pop(m["email"].lower(), None)
+            continue
+        hit = collapsed_onto(m["email"], clean_phone(m["phone_raw"], iso_from_location(m["location"])))
+        if not hit and m["email"].lower() in collisions:
+            rec = collisions[m["email"].lower()]
+            hit = (rec.get("contact_id"), rec.get("owner_email", ""))
+        if hit:
+            m["_collapsed_onto"], m["_collapsed_owner"] = hit
+            collisions.setdefault(m["email"].lower(), {})
+            collisions[m["email"].lower()].update({
+                "contact_id": hit[0], "owner_email": hit[1],
+                "name": f"{m['first'] or ''} {m['last'] or ''}".strip(),
+                "last_seen": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
+            collapsed.append(m)
+        else:
+            miss_ghl.append(m)
 
     if stamp_existing:
         n = 0
@@ -140,9 +231,24 @@ def main():
     print(f"\nMISSING FROM GHL  : {len(miss_ghl)}")
     for m in miss_ghl: print(f"   {(m['first'] or '')+' '+(m['last'] or ''):28} {m['email']:36} joined {m['joined'][:19] if m['joined'] else '?'}")
 
+    # Reported separately and on purpose. These are NOT missing - GHL holds them, folded
+    # into somebody else's contact - and they are NOT healthy either, because there are
+    # two real people-records behind each one. Counting them as missing made the number
+    # above permanently non-zero; hiding them would lose duplicates nobody can see.
+    print(f"\nCOLLAPSED ONTO AN EXISTING GHL CONTACT: {len(collapsed)}")
+    for m in collapsed:
+        print(f"   {(m['first'] or '')+' '+(m['last'] or ''):28} {m['email']:36} "
+              f"-> contact {m['_collapsed_onto']} now held by {m['_collapsed_owner']}")
+    if collapsed:
+        print("   (GHL deduped these on a shared phone number. Not rewritten, not merged, "
+              "not deleted - resolve by hand in GHL if they are genuinely one person.)")
+
     if not fix:
+        # Report-only writes nothing at all, not even the collision cache. Detection is
+        # rebuilt live from the pipeline each run, so nothing is lost by that.
         print("\nCheck only - rerun with --fix to backfill.")
         return
+    save_collisions(collisions)
     for m in miss_close:
         iso = iso_from_location(m["location"]); ph = clean_phone(m["phone_raw"], iso)
         name = f"{m['first'] or ''} {m['last'] or ''}".strip()
@@ -161,6 +267,7 @@ def main():
             close_lead[m["email"]] = {"id": d["id"]}
 
     ghl_contact = {}
+    claimed = {}          # contact id -> the email that legitimately owns it this run
     for m in miss_ghl:
         iso = iso_from_location(m["location"]); ph = clean_phone(m["phone_raw"], iso)
         name = f"{m['first'] or ''} {m['last'] or ''}".strip()
@@ -179,11 +286,41 @@ def main():
         s, d = ghl("POST", "/contacts/upsert", body)
         c = (d.get("contact") or {})
         print(f"  ghl upsert {name}: {s} {c.get('id','')}")
-        if c.get("id"):
-            ghl_contact[m["email"]] = c["id"]
-        if c.get("id") and not in_ghl(m["email"]):
+        if not c.get("id"):
+            continue
+        ghl_contact[m["email"]] = c["id"]
+
+        # Second line of defence, for a collapse the phone index could not see (a first
+        # collision, or one GHL deduped on something other than the number): the upsert
+        # handed back a contact that already belongs to a different email. Record it and
+        # stop - carding it would only hit OPPORTUNITY_NO_DUPLICATE, and the next run
+        # would do the whole thing over again, forever.
+        mine = m["email"].lower()
+        owner = ""
+        for candidate in ((c.get("email") or "").lower(),
+                          _GHL_EMAIL_BY_CONTACT.get(c["id"], ""),
+                          claimed.get(c["id"], "")):
+            if candidate and candidate != mine:
+                owner = candidate
+                break
+        if owner:
+            print(f"    collapsed onto existing contact {c['id']} (held by {owner}) "
+                  f"- recorded, not carded, and skipped from here on")
+            collisions[mine] = {
+                "contact_id": c["id"], "owner_email": owner, "name": name,
+                "last_seen": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+            m["_collapsed_onto"], m["_collapsed_owner"] = c["id"], owner
+            collapsed.append(m)
+            save_collisions(collisions)
+            continue
+        claimed[c["id"]] = mine
+
+        if not in_ghl(m["email"]):
             ghl("POST", "/opportunities/", {"pipelineId":PIPE,"locationId":LOC,"pipelineStageId":STAGE,
                 "name":f"{name} — Skool free community","status":"open","contactId":c["id"],"monetaryValue":0})
+
+    print(f"\ncollapsed onto an existing GHL contact, total: {len(collapsed)} "
+          f"(recorded in {STATE_FILE}; never rewritten again)")
 
     # ---- Tell the team ------------------------------------------------------
     # Driven off the Close stamp rather than "did we just create it", so a member
@@ -226,7 +363,7 @@ def main():
         for m in pending:
             if notify_slack.post_member(m, close_id=close_lead[m["email"]]["id"],
                                         ghl_contact_id=ghl_contact.get(m["email"])
-                                                       or ghl_contact_id(m["email"])):
+                                                       or ghl_contact_id(m["email"], collisions)):
                 if not notify_slack.stamp_close(close, close_lead[m["email"]]["id"]):
                     print(f"  WARNING: stamp failed for {m['email']} - it will re-announce")
                 print(f"  slack announced {m['email']}")
