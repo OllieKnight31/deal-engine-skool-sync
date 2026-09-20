@@ -81,7 +81,7 @@ jobs:
           LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
           INTERVAL:        ${{ inputs.interval || '300' }}
           FORCE_DEEP:      ${{ inputs.deep && 'yes' || 'no' }}
-          DEEP_HOUR:       "4"     # UTC. Arbitrary in CI - there is no machine to wake.
+          DEEP_HOUR:       "04"    # UTC. Arbitrary in CI - there is no machine to wake.
           DEEP_PAGES:      "60"
         run: |
           set -u
@@ -93,7 +93,11 @@ jobs:
             PAGES=3
             [ $(( PASS % 6 )) -eq 0 ] && PAGES=8
 
-            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES"
+            # 10# on both sides: a DEEP_HOUR written as "04" or "08" must still match, and
+            # bare $((08)) is an octal error in bash. Logged every pass so the one job that
+            # has never once succeeded is auditable without guessing.
+            NOW_H=$(( 10#$(date -u +%H) )); WANT_H=$(( 10#$DEEP_HOUR ))
+            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES  utc_hour=$NOW_H  deep_at=$WANT_H  deep_done=$DEEP_DONE"
             python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed on pass $PASS"; }
             python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed on pass $PASS"; }
 
@@ -112,7 +116,7 @@ jobs:
             # and Close's search index lags writes by minutes, so a deep scan running
             # CONCURRENTLY with the 5-minute pass would read "not in Close" for a lead the
             # other pass had just created and duplicate it.
-            if [ "$DEEP_DONE" = "0" ] && { [ "$FORCE_DEEP" = "yes" ] || [ "$(date -u +%-H)" = "$DEEP_HOUR" ]; }; then
+            if [ "$DEEP_DONE" = "0" ] && { [ "$FORCE_DEEP" = "yes" ] || [ "$NOW_H" -eq "$WANT_H" ]; }; then
               DEEP_DONE=1
               echo "::group::DEEP SCAN  $DEEP_PAGES pages  $(date -u +%H:%M:%SZ)"
               if python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix; then
