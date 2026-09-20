@@ -126,8 +126,20 @@ jobs:
           # neither a tag nor a branch. It also doubles as an audit trail: "did the digest
           # go out on the 19th?" is answerable by listing the refs.
           hm()      { echo $(( 10#${1%%:*} * 60 + 10#${1##*:} )); }
-          claim()   { gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                        -f ref="refs/daily-claim/$1/$DAY" -f sha="$GITHUB_SHA" >/dev/null 2>&1; }
+          # 0 = we own today's slot, 1 = somebody already does, 2 = the claim itself is
+          # BROKEN. That third case has to be its own answer: collapsing it into "already
+          # done" would silently disable all three daily jobs forever the moment the API
+          # or the token changed, which is the same dead-pipe-reads-as-healthy failure the
+          # rest of this codebase is built to refuse.
+          claim() {
+            local out rc=0
+            out=$(gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                    -f ref="refs/daily-claim/$1/$DAY" -f sha="$GITHUB_SHA" 2>&1) || rc=$?
+            if [ "$rc" = "0" ]; then return 0; fi
+            case "$out" in *"Reference already exists"*) return 1;; esac
+            echo "::error::$1 claim could not be taken and it is NOT a duplicate: $out"
+            return 2
+          }
           release() { gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/daily-claim/$1/$DAY" \
                         >/dev/null 2>&1 || true; }
 
@@ -141,9 +153,18 @@ jobs:
             local flag="DONE_$slot"
             if [ "${!flag}" = "1" ]; then return 0; fi
             if [ "$NOW_HM" -lt "$at" ]; then return 0; fi
-            if ! claim "$slot"; then
+            local c=0
+            claim "$slot" || c=$?
+            if [ "$c" = "1" ]; then
               printf -v "$flag" 1
               echo "  [$slot] already done today - skipping ($desc)"
+              return 0
+            fi
+            if [ "$c" != "0" ]; then
+              printf -v "$flag" 1
+              FAILED=1
+              echo "::error::[$slot] NOT RUN - the once-a-day claim is unavailable. Refusing to"
+              echo "::error::run it unguarded rather than risk posting to Slack twice. Fix the claim."
               return 0
             fi
             echo "::group::$desc  $(date -u +%H:%M:%SZ)"
