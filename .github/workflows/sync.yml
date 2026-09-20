@@ -38,6 +38,10 @@ on:
         description: "force the daily join count (still honours the once-a-day claim)"
         type: boolean
         default: false
+      force_weekly:
+        description: "force the Monday attribution digest (still honours the claim)"
+        type: boolean
+        default: false
       handoff:
         description: "dispatch a successor when this run ends"
         type: boolean
@@ -77,6 +81,7 @@ jobs:
       #   once/day 04:00 UTC     reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
       #   once/day 06:20 UTC     pipeline_advance.py                   <- was maintenance.yml cron
       #   once/day 07:30 UTC     attribution_digest.py --days 1 --post <- was skool-daily-count
+      #   Mondays  08:00 UTC     attribution_digest.py --days 7 --post <- was maintenance.yml cron
       #
       # The three once-a-day jobs were all stranded on GitHub cron, which drops runs. The
       # daily join count in particular had NEVER fired: `Skool maintenance` had
@@ -99,15 +104,17 @@ jobs:
           FORCE_DEEP:      ${{ inputs.deep && 'yes' || 'no' }}
           FORCE_HYGIENE:   ${{ inputs.force_hygiene && 'yes' || 'no' }}
           FORCE_DIGEST:    ${{ inputs.force_digest && 'yes' || 'no' }}
+          FORCE_WEEKLY:    ${{ inputs.force_weekly && 'yes' || 'no' }}
           DEEP_AT:         "04:00"  # UTC. Arbitrary in CI - there is no machine to wake.
           HYGIENE_AT:      "06:20"  # matches the maintenance.yml cron it supersedes
           DIGEST_AT:       "07:30"  # 08:30 London - matches com.dealengine.skool-daily-count
+          WEEKLY_AT:       "08:00"  # Mondays only - matches the maintenance.yml cron
           DEEP_PAGES:      "60"
         run: |
           set -u
           END=$(( $(date +%s) + LOOP_MINUTES * 60 ))
           FAILED=0; PASS=0
-          DONE_deepscan=0; DONE_hygiene=0; DONE_digest=0
+          DONE_deepscan=0; DONE_hygiene=0; DONE_digest=0; DONE_weekly=0
 
           # --- once-a-day jobs, guarded by an ATOMIC server-side claim ------------------
           # A run lasts ~55 min, so two consecutive runs can both be alive inside the same
@@ -164,6 +171,8 @@ jobs:
             DAY=$(date -u +%F)
             NOW_HM=$(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
             DEEP_HM=$(hm "$DEEP_AT"); HYG_HM=$(hm "$HYGIENE_AT"); DIG_HM=$(hm "$DIGEST_AT")
+            WEEKLY_HM=$(hm "$WEEKLY_AT")
+            if [ "$FORCE_WEEKLY"  = "yes" ]; then WEEKLY_HM=0; fi
             if [ "$FORCE_DEEP"    = "yes" ]; then DEEP_HM=0; fi
             if [ "$FORCE_HYGIENE" = "yes" ]; then HYG_HM=0;  fi
             if [ "$FORCE_DIGEST"  = "yes" ]; then DIG_HM=0;  fi
@@ -201,6 +210,16 @@ jobs:
             daily digest "$DIG_HM" "DAILY JOIN COUNT" \
               python scripts/attribution_digest.py --days 1 --post
 
+            # The Monday attribution digest. Same once-a-day claim - the claim key is the
+            # date, and there is only one Monday per week, so it needs no new mechanism.
+            # It rides the chain for the same reason as the rest: maintenance.yml now shares
+            # this workflow's concurrency group, so a cron there will normally be superseded
+            # by the chain's next hand-off and cannot be depended on.
+            if [ "$(date -u +%u)" = "1" ] || [ "$FORCE_WEEKLY" = "yes" ]; then
+              daily weekly "$WEEKLY_HM" "WEEKLY ATTRIBUTION DIGEST" \
+                python scripts/attribution_digest.py --days 7 --post
+            fi
+
             # Explicit, because `[ ... ] && sleep` as the loop's last command returns 1 on
             # the final pass and marked every healthy run in the pinger repo as failed.
             NOW=$(date +%s)
@@ -208,7 +227,7 @@ jobs:
             sleep "$INTERVAL"
           done
 
-          echo "completed $PASS passes; deepscan=$DONE_deepscan hygiene=$DONE_hygiene digest=$DONE_digest"
+          echo "completed $PASS passes; deepscan=$DONE_deepscan hygiene=$DONE_hygiene digest=$DONE_digest weekly=$DONE_weekly"
           exit $FAILED
 
       # Hand off after success OR failure, but never after a cancel: cancelling a run must

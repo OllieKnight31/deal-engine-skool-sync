@@ -124,6 +124,7 @@ activity, so the restarter would otherwise switch itself off unnoticed.
 | once/day 04:00 UTC | the reconcile widens to `--pages 60` — the full-community deep scan |
 | once/day 06:20 UTC | `pipeline_advance.py` — pipeline hygiene |
 | once/day 07:30 UTC | `attribution_digest.py --days 1 --post` — the daily join count |
+| Mondays 08:00 UTC | `attribution_digest.py --days 7 --post` — the weekly attribution digest |
 
 ### The once-a-day jobs, and why the guard is a git ref
 
