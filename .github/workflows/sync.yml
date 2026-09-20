@@ -1,33 +1,52 @@
 name: Skool sync
 
-# Keeps Close and GoHighLevel in step with the Skool free community, and tells the
-# team in Slack about every new member. No server, no browser, no laptop.
+# WHY THIS IS A SELF-DISPATCHING CHAIN AND NOT A CRON
+# GitHub's `schedule` trigger is best-effort and openly de-prioritised. Measured on this
+# repo over 19-20 Sept the hourly "7 * * * *" cron fired with gaps of 246, 288, 201, 172,
+# 181 and 162 minutes - and nothing at all between 01:00Z and 05:50Z. Each run only covers
+# ~55 minutes of internal polling, so real coverage was ~28% of the clock.
 #
-# WHY THE HOURLY CRON AND THE INTERNAL LOOP
-# A "*/10" schedule produced exactly ONE run in 5h40m on 18 Sept - GitHub openly
-# de-prioritises and drops short-interval schedules. Hourly schedules are honoured far
-# more reliably, so the cron fires once an hour and the job then loops internally every
-# 5 minutes for ~55 minutes. That gives genuine 5-minute coverage with no third-party
-# scheduler, no extra token, and no cost (public repos get unlimited Actions minutes).
+# So the cadence does not depend on cron at all. Each run polls internally for ~55 minutes
+# and then DISPATCHES ITS OWN SUCCESSOR, exactly as OllieKnight31/speed-to-lead-pinger does
+# (proven: a clean unbroken ~50-minute chain over 24h). The `*/15` cron below is only a
+# restarter for the case where the chain is ever broken - a cancelled run, a GitHub-side
+# kill, or a disabled schedule - and `concurrency` collapses the duplicates it creates.
 #
-# If you would rather drive it externally instead, delete the loop, set the cron back to
-# "*/5 * * * *" as a fallback, and POST every 5 minutes from any cron service to:
-#   https://api.github.com/repos/OllieKnight31/deal-engine-skool-sync/actions/workflows/sync.yml/dispatches
-#   -H "Authorization: Bearer <fine-grained PAT with Actions: read+write on this repo>"
-#   -H "Accept: application/vnd.github+json"   -d '{"ref":"main"}'
+# This also replaces the Mac launchd agents com.dealengine.{skool-ghl-sync, skool-reconcile,
+# skool-ghl-deepscan, ghl-close-sync}, which only achieved 24-42% coverage because the
+# MacBook sleeps when the lid closes.
 on:
   schedule:
-    - cron: "7 * * * *"       # hourly, offset off the hour (the busiest minute for GitHub)
+    - cron: "*/15 * * * *"        # restarter ONLY - the chain is what provides the cadence
   workflow_dispatch:
+    inputs:
+      loop_minutes:
+        description: "minutes to poll before handing off (0 = one pass then hand off)"
+        default: "55"
+      interval:
+        description: "seconds between passes"
+        default: "300"
+      deep:
+        description: "force the 60-page deep scan on the first pass"
+        type: boolean
+        default: false
+      handoff:
+        description: "dispatch a successor when this run ends"
+        type: boolean
+        default: true
 
 concurrency:
   group: skool-sync
-  cancel-in-progress: false   # never let two runs write at once
+  cancel-in-progress: false       # never let two runs write at once
+
+permissions:
+  contents: read
+  actions: write                  # lets the run dispatch its successor
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 85           # loop budget 55m + headroom for a 60-page deep pass
     steps:
       - uses: actions/checkout@v4
 
@@ -36,17 +55,22 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # phonenumbers MUST be present - skool_to_ghl.py exits hard without it rather than
+      # silently discarding every phone number.
       - run: pip install -r requirements.txt
 
-      # Every 5 minutes for ~55 minutes:
-      #   1. anything in Skool missing from either CRM is created in both, and anyone
-      #      genuinely new is announced in Slack (#1-de-community-joins)
-      #   2. valid free-text phone answers are promoted into Close's phone field and
-      #      mangled "+1..." numbers repaired
+      # The polling loop. Work is tiered so the 5-minute lead path stays fast while the
+      # slower sweeps that used to be separate launchd agents still happen:
       #
-      # A failing iteration does not stop the loop - the next one retries, and every
-      # write is idempotent - but the job still ends red so a real breakage is loud
-      # rather than silently syncing nothing.
+      #   every pass   (~5 min)  reconcile_skool.py --pages 3  --fix   + phone normalise
+      #   every 3rd    (~15 min) ghl_dfy_to_close.py --apply           <- was ghl-close-sync
+      #   every 6th    (~30 min) reconcile_skool.py --pages 8  --fix   <- was skool-reconcile
+      #                                                                   and skool-ghl-sync
+      #   once at DEEP_HOUR UTC  reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
+      #
+      # A failing pass does NOT stop the loop - the next one retries and every write is
+      # idempotent - but the job still ends red, so a real breakage is loud rather than
+      # wearing the costume of a clean run.
       - name: Sync loop
         env:
           SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
@@ -54,20 +78,67 @@ jobs:
           GHL_PIT:         ${{ secrets.GHL_PIT }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
-          SKOOL_PAGES:     "3"
+          LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
+          INTERVAL:        ${{ inputs.interval || '300' }}
+          FORCE_DEEP:      ${{ inputs.deep && 'yes' || 'no' }}
+          DEEP_HOUR:       "4"     # UTC. Arbitrary in CI - there is no machine to wake.
+          DEEP_PAGES:      "60"
         run: |
           set -u
-          END=$(( $(date +%s) + 55*60 ))
-          FAILED=0
-          PASS=0
+          END=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+          FAILED=0; PASS=0; DEEP_DONE=0
+
           while :; do
             PASS=$((PASS+1))
-            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)"
-            python scripts/reconcile_skool.py --pages 3 --fix     || { FAILED=1; echo "reconcile failed"; }
-            python scripts/close_phone_normalise.py --apply       || { FAILED=1; echo "normalise failed"; }
+            PAGES=3
+            [ $(( PASS % 6 )) -eq 0 ] && PAGES=8
+
+            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES"
+            python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed on pass $PASS"; }
+            python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed on pass $PASS"; }
+
+            # Mirrors the GHL Setter Pipeline (DFY / Mentorship applications) into Close.
+            # 15 minutes matches the launchd agent it replaces; it pages the whole Close
+            # lead list, so it is deliberately not run every 5.
+            if [ $(( PASS % 3 )) -eq 1 ]; then
+              python scripts/ghl_dfy_to_close.py --apply             || { FAILED=1; echo "::warning::ghl->close mirror failed on pass $PASS"; }
+            fi
             echo "::endgroup::"
-            [ "$(date +%s)" -ge "$END" ] && break
-            sleep 300
+
+            # The 60-page deep scan. On the Mac this NEVER once succeeded: it fired at
+            # 04:30 while the machine was in Deep Idle, DarkWoke for ~45s with no DNS, and
+            # died on socket.gaierror. In CI there is no machine to wake, so it just runs.
+            # Kept inside this loop on purpose: the loop is the single serialised writer,
+            # and Close's search index lags writes by minutes, so a deep scan running
+            # CONCURRENTLY with the 5-minute pass would read "not in Close" for a lead the
+            # other pass had just created and duplicate it.
+            if [ "$DEEP_DONE" = "0" ] && { [ "$FORCE_DEEP" = "yes" ] || [ "$(date -u +%-H)" = "$DEEP_HOUR" ]; }; then
+              DEEP_DONE=1
+              echo "::group::DEEP SCAN  $DEEP_PAGES pages  $(date -u +%H:%M:%SZ)"
+              if python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix; then
+                echo "deep scan completed at $(date -u +%H:%M:%SZ)"
+              else
+                FAILED=1; echo "::error::deep scan FAILED"
+              fi
+              echo "::endgroup::"
+            fi
+
+            # Explicit, because `[ ... ] && sleep` as the loop's last command returns 1 on
+            # the final pass and marked every healthy run in the pinger repo as failed.
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END" ]; then break; fi
+            sleep "$INTERVAL"
           done
-          echo "completed $PASS passes"
+
+          echo "completed $PASS passes; deep scan run this cycle: $DEEP_DONE"
           exit $FAILED
+
+      # Hand off after success OR failure, but never after a cancel: cancelling a run must
+      # be able to stop the chain by hand. If GitHub itself kills a run, the */15 cron
+      # restarts it. Defaults are used deliberately - a short test run hands off to a
+      # normal-length successor.
+      - name: Hand off to the next run
+        if: ${{ !cancelled() && (inputs.handoff == null || inputs.handoff) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run sync.yml --repo "$GITHUB_REPOSITORY" --ref main

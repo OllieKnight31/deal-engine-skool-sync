@@ -1,20 +1,24 @@
 name: Skool maintenance
 
-# Slower jobs that do not belong in the 5-minute sync loop:
-#   - pipeline hygiene, which needs the FULL 60-page member list to spot departures
-#   - the weekly attribution digest
-# Both are safe to miss a run, so an ordinary daily/weekly cron is fine here - unlike the
-# lead sync, where GitHub's dropped schedules actually cost you speed-to-lead.
+# Slower jobs that do not belong in the 5-minute sync chain. All of them are safe to miss
+# a run, so an ordinary cron is fine here - unlike the lead sync, where GitHub's dropped
+# schedules actually cost speed-to-lead, and which therefore self-dispatches instead.
+#
+# NOTE: the 60-page deep scan is deliberately NOT here. It lives inside the sync loop
+# (workflow `Skool sync`), because that loop is the single serialised writer and Close's
+# search index lags writes by minutes - a deep scan running concurrently with a 5-minute
+# pass would read "not in Close" for a lead the other pass had just created, and duplicate it.
 on:
   schedule:
     - cron: "20 6 * * *"      # daily  06:20 UTC - pipeline hygiene
-    - cron: "0 8 * * 1"       # Monday 08:00 UTC - attribution digest
+    - cron: "30 7 * * *"      # daily  07:30 UTC (08:30 London) - yesterday's join count
+    - cron: "0 8 * * 1"       # Monday 08:00 UTC - weekly attribution digest
   workflow_dispatch:
     inputs:
       job:
         description: "Which job to run on demand"
         type: choice
-        options: [both, hygiene, digest]
+        options: [both, hygiene, digest, daily]
         default: both
 
 jobs:
@@ -45,6 +49,25 @@ jobs:
           # silently only covers the minority of the board that happens to carry one.
           python scripts/pipeline_advance.py --repair-urls --apply
           python scripts/pipeline_advance.py --apply --stale-days 21 --max-moves 150
+
+  daily:
+    # Replaces the Mac launchd agent com.dealengine.skool-daily-count (08:30 London).
+    if: github.event.schedule == '30 7 * * *' || github.event_name == 'workflow_dispatch' && inputs.job == 'daily'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: Yesterday's joins
+        env:
+          SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:   ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:         ${{ secrets.GHL_PIT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+        run: python scripts/attribution_digest.py --days 1 --post
 
   digest:
     if: github.event.schedule == '0 8 * * 1' || github.event_name == 'workflow_dispatch' && (inputs.job == 'both' || inputs.job == 'digest')

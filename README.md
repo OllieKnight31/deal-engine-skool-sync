@@ -14,6 +14,8 @@ Runs on GitHub Actions. No server, no browser, no laptop.
 | Announce genuinely new members in Slack `#1-de-community-joins` | `scripts/notify_slack.py` (called by the reconciler) |
 | Promote valid free-text phone answers into Close's phone field, repair mangled `+1…` numbers | `scripts/close_phone_normalise.py --apply` |
 | One-way Skool → GoHighLevel push (used for backfills) | `scripts/skool_to_ghl.py --apply` |
+| Mirror the GHL Setter Pipeline (DFY / Mentorship applications) into Close | `scripts/ghl_dfy_to_close.py --apply` |
+| Full 60-page sweep of the whole community, once a day | `scripts/reconcile_skool.py --pages 60 --fix` |
 
 Every write is idempotent — contacts upsert on email, and a pipeline card is only
 created if the member has none. Re-running never duplicates anything.
@@ -92,9 +94,54 @@ python scripts/reconcile_skool.py --pages 3 --stamp-existing
 This marks everyone currently known as already-announced and posts nothing. From then on only
 genuinely new joins appear. `--no-notify` also suppresses posting for any one-off run.
 
-## Known issue — GitHub's scheduler is not punctual
+## Cadence — a self-dispatching chain, not a cron
 
-On 18 Sept the `*/10` cron produced **one run in 5 hours 40 minutes**. GitHub explicitly
-de-prioritises and drops short-interval schedules, so treat the cadence as *eventual*, not
-every-N-minutes. Everything here is idempotent and self-healing precisely because of that —
-but if Slack alerts need to be genuinely prompt, the trigger has to move off GitHub cron.
+GitHub's `schedule` trigger is best-effort and openly de-prioritised. Measured on this repo
+over 19–20 Sept the hourly `7 * * * *` cron fired with gaps of **246, 288, 201, 172, 181 and
+162 minutes**, and nothing at all between 01:00Z and 05:50Z. Each run only covers ~55 minutes
+of internal polling, so genuine coverage was **~28% of the clock**.
+
+So the cadence no longer depends on cron. Each `Skool sync` run polls for ~55 minutes and then
+**dispatches its own successor** (`gh workflow run sync.yml`), the same pattern that gives
+`OllieKnight31/speed-to-lead-pinger` an unbroken chain. `concurrency: skool-sync` with
+`cancel-in-progress: false` guarantees exactly one live writer however many triggers pile up.
+The `*/15` cron is a **restarter only**, for a chain broken by a cancel or a GitHub-side kill.
+
+Cancelling a run stops the chain deliberately — the hand-off is skipped on cancel, never on
+failure. To restart it by hand: `gh workflow run sync.yml -R OllieKnight31/deal-engine-skool-sync`.
+
+`keepalive.yml` makes an empty commit twice a month, because GitHub disables scheduled
+workflows on a repo with 60 days of no commits — and API self-dispatch does not count as
+activity, so the restarter would otherwise switch itself off unnoticed.
+
+### What each pass does
+
+| Cadence | Work |
+|---|---|
+| every pass (~5 min) | `reconcile_skool.py --pages 3 --fix`, `close_phone_normalise.py --apply` |
+| every 3rd pass (~15 min) | `ghl_dfy_to_close.py --apply` |
+| every 6th pass (~30 min) | the reconcile widens to `--pages 8` |
+| once per day at 04:00 UTC | the reconcile widens to `--pages 60` — the full-community deep scan |
+
+The deep scan lives **inside** the loop rather than in its own workflow on purpose: the loop is
+the single serialised writer, and Close's search index lags writes by minutes, so a deep scan
+running concurrently with a 5-minute pass would read "not in Close" for a lead the other pass
+had just created and duplicate it.
+
+## Replaces these Mac launchd agents
+
+These ran on Ollie's MacBook and only achieved 24–42% of their expected runs, because the
+machine sleeps when the lid closes. The 04:30 deep scan had **never once succeeded** — it fired
+during Deep Idle, DarkWoke for ~45s with no DNS, and died on `socket.gaierror`.
+
+| launchd agent | Was | Now |
+|---|---|---|
+| `com.dealengine.ghl-close-sync` | every 15 min | every 3rd loop pass |
+| `com.dealengine.skool-ghl-sync` | every 30 min | covered by the reconcile (which writes GHL too) |
+| `com.dealengine.skool-reconcile` | every 2 h | every 6th loop pass, `--pages 8` |
+| `com.dealengine.skool-ghl-deepscan` | nightly 04:30, never succeeded | daily 04:00 UTC inside the loop |
+| `com.dealengine.skool-daily-count` | daily 08:30 | `Skool maintenance` → `daily` job, 07:30 UTC |
+
+`com.dealengine.skool-cookie-refresh` is **not** replaced — it reads Chrome's cookie store on
+disk, which only exists on the Mac. It refreshes the local `.secrets/skool_cookie` file; the
+`SKOOL_COOKIE` repo secret is separate and lasts ~364 days.

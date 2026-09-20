@@ -1,0 +1,26 @@
+name: Keep the schedule alive
+
+# GitHub silently DISABLES scheduled workflows on a repo with no commit activity for 60
+# days. The sync chain dispatches itself through the API, which does NOT count as activity,
+# so without this the restarter cron would quietly switch itself off - and the day the
+# chain does break there would be nothing left to restart it. An empty commit twice a
+# month keeps the repo active forever. Same pattern as speed-to-lead-pinger.
+on:
+  schedule:
+    - cron: "17 3 1,15 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit
+        run: |
+          git config user.name "keepalive"
+          git config user.email "keepalive@users.noreply.github.com"
+          git commit --allow-empty -m "keepalive: $(date -u +%Y-%m-%d) - keeps the Skool sync restarter cron enabled"
+          git push
