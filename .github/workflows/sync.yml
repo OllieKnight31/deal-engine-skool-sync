@@ -27,7 +27,15 @@ on:
         description: "seconds between passes"
         default: "300"
       deep:
-        description: "force the 60-page deep scan on the first pass"
+        description: "force the 60-page deep scan (still honours the once-a-day claim)"
+        type: boolean
+        default: false
+      force_hygiene:
+        description: "force pipeline hygiene (still honours the once-a-day claim)"
+        type: boolean
+        default: false
+      force_digest:
+        description: "force the daily join count (still honours the once-a-day claim)"
         type: boolean
         default: false
       handoff:
@@ -40,7 +48,7 @@ concurrency:
   cancel-in-progress: false       # never let two runs write at once
 
 permissions:
-  contents: read
+  contents: write                 # creates the atomic once-a-day claim refs (see below)
   actions: write                  # lets the run dispatch its successor
 
 jobs:
@@ -66,7 +74,14 @@ jobs:
       #   every 3rd    (~15 min) ghl_dfy_to_close.py --apply           <- was ghl-close-sync
       #   every 6th    (~30 min) reconcile_skool.py --pages 8  --fix   <- was skool-reconcile
       #                                                                   and skool-ghl-sync
-      #   once at DEEP_HOUR UTC  reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
+      #   once/day 04:00 UTC     reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
+      #   once/day 06:20 UTC     pipeline_advance.py                   <- was maintenance.yml cron
+      #   once/day 07:30 UTC     attribution_digest.py --days 1 --post <- was skool-daily-count
+      #
+      # The three once-a-day jobs were all stranded on GitHub cron, which drops runs. The
+      # daily join count in particular had NEVER fired: `Skool maintenance` had
+      # total_count == 0, so both of its cron slots were dropped and nobody produced the
+      # number that tells us the funnel is alive. They now ride the chain instead.
       #
       # A failing pass does NOT stop the loop - the next one retries and every write is
       # idempotent - but the job still ends red, so a real breakage is loud rather than
@@ -80,24 +95,80 @@ jobs:
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
           LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
           INTERVAL:        ${{ inputs.interval || '300' }}
+          GH_TOKEN:        ${{ github.token }}
           FORCE_DEEP:      ${{ inputs.deep && 'yes' || 'no' }}
-          DEEP_HOUR:       "04"    # UTC. Arbitrary in CI - there is no machine to wake.
+          FORCE_HYGIENE:   ${{ inputs.force_hygiene && 'yes' || 'no' }}
+          FORCE_DIGEST:    ${{ inputs.force_digest && 'yes' || 'no' }}
+          DEEP_AT:         "04:00"  # UTC. Arbitrary in CI - there is no machine to wake.
+          HYGIENE_AT:      "06:20"  # matches the maintenance.yml cron it supersedes
+          DIGEST_AT:       "07:30"  # 08:30 London - matches com.dealengine.skool-daily-count
           DEEP_PAGES:      "60"
         run: |
           set -u
           END=$(( $(date +%s) + LOOP_MINUTES * 60 ))
-          FAILED=0; PASS=0; DEEP_DONE=0
+          FAILED=0; PASS=0
+          DONE_deepscan=0; DONE_hygiene=0; DONE_digest=0
+
+          # --- once-a-day jobs, guarded by an ATOMIC server-side claim ------------------
+          # A run lasts ~55 min, so two consecutive runs can both be alive inside the same
+          # hour - an in-run flag alone would double-post the join count to Slack. Creating
+          # a git ref is atomic on GitHub's side: the first caller gets 201, every other
+          # caller gets 422 "Reference already exists". That is the guard, and it survives
+          # restarts, overlapping runs and the */15 cron because it lives on the server.
+          # refs/daily-claim/<slot>/<UTC date> is its own ref namespace, so it shows up as
+          # neither a tag nor a branch. It also doubles as an audit trail: "did the digest
+          # go out on the 19th?" is answerable by listing the refs.
+          hm()      { echo $(( 10#${1%%:*} * 60 + 10#${1##*:} )); }
+          claim()   { gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                        -f ref="refs/daily-claim/$1/$DAY" -f sha="$GITHUB_SHA" >/dev/null 2>&1; }
+          release() { gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/daily-claim/$1/$DAY" \
+                        >/dev/null 2>&1 || true; }
+
+          # daily <slot> <at_minutes> <description> <command...>
+          # Fires once the clock is PAST the slot time rather than exactly on it, so a job
+          # is caught up rather than silently skipped for the day if the chain was down at
+          # the appointed minute. Explicit `if` blocks, never `[ ... ] && return`, because a
+          # false test as a function's last command returns 1 and `set -e` would kill the run.
+          daily() {
+            local slot=$1 at=$2 desc=$3; shift 3
+            local flag="DONE_$slot"
+            if [ "${!flag}" = "1" ]; then return 0; fi
+            if [ "$NOW_HM" -lt "$at" ]; then return 0; fi
+            if ! claim "$slot"; then
+              printf -v "$flag" 1
+              echo "  [$slot] already done today - skipping ($desc)"
+              return 0
+            fi
+            echo "::group::$desc  $(date -u +%H:%M:%SZ)"
+            if "$@"; then
+              printf -v "$flag" 1
+              echo "$slot completed at $(date -u +%H:%M:%SZ)"
+            else
+              printf -v "$flag" 1   # do not retry inside THIS run
+              release "$slot"       # but let a LATER run retry today
+              FAILED=1
+              echo "::error::$slot FAILED - claim released so a later run retries"
+            fi
+            echo "::endgroup::"
+            return 0
+          }
 
           while :; do
             PASS=$((PASS+1))
             PAGES=3
             [ $(( PASS % 6 )) -eq 0 ] && PAGES=8
 
-            # 10# on both sides: a DEEP_HOUR written as "04" or "08" must still match, and
-            # bare $((08)) is an octal error in bash. Logged every pass so the one job that
-            # has never once succeeded is auditable without guessing.
-            NOW_H=$(( 10#$(date -u +%H) )); WANT_H=$(( 10#$DEEP_HOUR ))
-            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES  utc_hour=$NOW_H  deep_at=$WANT_H  deep_done=$DEEP_DONE"
+            # 10# on both sides: an hour written "04" or "08" must still compare correctly,
+            # and bare $((08)) is an octal error in bash. Recomputed every pass so a run
+            # that spans midnight UTC claims against the right day.
+            DAY=$(date -u +%F)
+            NOW_HM=$(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
+            DEEP_HM=$(hm "$DEEP_AT"); HYG_HM=$(hm "$HYGIENE_AT"); DIG_HM=$(hm "$DIGEST_AT")
+            if [ "$FORCE_DEEP"    = "yes" ]; then DEEP_HM=0; fi
+            if [ "$FORCE_HYGIENE" = "yes" ]; then HYG_HM=0;  fi
+            if [ "$FORCE_DIGEST"  = "yes" ]; then DIG_HM=0;  fi
+
+            echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES  utc_min=$NOW_HM  deep@$DEEP_HM/$DONE_deepscan  hygiene@$HYG_HM/$DONE_hygiene  digest@$DIG_HM/$DONE_digest"
             python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed on pass $PASS"; }
             python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed on pass $PASS"; }
 
@@ -109,23 +180,26 @@ jobs:
             fi
             echo "::endgroup::"
 
-            # The 60-page deep scan. On the Mac this NEVER once succeeded: it fired at
-            # 04:30 while the machine was in Deep Idle, DarkWoke for ~45s with no DNS, and
-            # died on socket.gaierror. In CI there is no machine to wake, so it just runs.
-            # Kept inside this loop on purpose: the loop is the single serialised writer,
-            # and Close's search index lags writes by minutes, so a deep scan running
-            # CONCURRENTLY with the 5-minute pass would read "not in Close" for a lead the
-            # other pass had just created and duplicate it.
-            if [ "$DEEP_DONE" = "0" ] && { [ "$FORCE_DEEP" = "yes" ] || [ "$NOW_H" -eq "$WANT_H" ]; }; then
-              DEEP_DONE=1
-              echo "::group::DEEP SCAN  $DEEP_PAGES pages  $(date -u +%H:%M:%SZ)"
-              if python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix; then
-                echo "deep scan completed at $(date -u +%H:%M:%SZ)"
-              else
-                FAILED=1; echo "::error::deep scan FAILED"
-              fi
-              echo "::endgroup::"
-            fi
+            # The 60-page deep scan. On the Mac this NEVER once succeeded: it fired at 04:30
+            # while the machine was in Deep Idle, DarkWoke for ~45s with no DNS, and died on
+            # socket.gaierror. All three of these live INSIDE the loop on purpose: the loop
+            # is the single serialised writer, and Close's search index lags writes by
+            # minutes, so anything running CONCURRENTLY with the 5-minute pass would read
+            # "not in Close" for a lead that pass had just created, and duplicate it.
+            daily deepscan "$DEEP_HM" "DEEP SCAN  $DEEP_PAGES pages" \
+              python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix
+
+            # Pipeline hygiene. Repair the Skool Profile URLs first - departure detection
+            # keys on the handle, and leads the old Zap created never had that field mapped.
+            daily hygiene "$HYG_HM" "PIPELINE HYGIENE" \
+              bash -c 'python scripts/pipeline_advance.py --repair-urls --apply &&
+                       python scripts/pipeline_advance.py --apply --stale-days 21 --max-moves 150'
+
+            # The daily join count. This is the number that tells us the funnel is alive,
+            # and it posts to Slack - which is exactly why the claim above has to be atomic
+            # rather than a flag in this shell.
+            daily digest "$DIG_HM" "DAILY JOIN COUNT" \
+              python scripts/attribution_digest.py --days 1 --post
 
             # Explicit, because `[ ... ] && sleep` as the loop's last command returns 1 on
             # the final pass and marked every healthy run in the pinger repo as failed.
@@ -134,7 +208,7 @@ jobs:
             sleep "$INTERVAL"
           done
 
-          echo "completed $PASS passes; deep scan run this cycle: $DEEP_DONE"
+          echo "completed $PASS passes; deepscan=$DONE_deepscan hygiene=$DONE_hygiene digest=$DONE_digest"
           exit $FAILED
 
       # Hand off after success OR failure, but never after a cancel: cancelling a run must

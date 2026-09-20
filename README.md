@@ -121,7 +121,34 @@ activity, so the restarter would otherwise switch itself off unnoticed.
 | every pass (~5 min) | `reconcile_skool.py --pages 3 --fix`, `close_phone_normalise.py --apply` |
 | every 3rd pass (~15 min) | `ghl_dfy_to_close.py --apply` |
 | every 6th pass (~30 min) | the reconcile widens to `--pages 8` |
-| once per day at 04:00 UTC | the reconcile widens to `--pages 60` — the full-community deep scan |
+| once/day 04:00 UTC | the reconcile widens to `--pages 60` — the full-community deep scan |
+| once/day 06:20 UTC | `pipeline_advance.py` — pipeline hygiene |
+| once/day 07:30 UTC | `attribution_digest.py --days 1 --post` — the daily join count |
+
+### The once-a-day jobs, and why the guard is a git ref
+
+All three used to hang off cron and all three were being dropped. `Skool maintenance` had
+**`total_count == 0`** — both of the daily join count's slots (19 Sept 07:30 UTC, 20 Sept
+06:20 UTC) were silently dropped, so the number that says the funnel is alive was never
+produced, while the launchd agent that used to produce it had already been retired.
+
+A run lasts ~55 minutes, so two consecutive runs can both be alive inside the same hour — an
+in-run flag alone would post the join count to Slack twice. So the guard is an **atomic
+server-side claim**: the run creates `refs/daily-claim/<slot>/<UTC date>`, and GitHub gives
+the first caller 201 and every other caller 422 *Reference already exists*. It is race-free,
+survives restarts and overlapping runs, is neither a tag nor a branch, and doubles as an
+audit trail:
+
+```bash
+gh api repos/OllieKnight31/deal-engine-skool-sync/git/matching-refs/daily-claim
+```
+
+Each job fires once the clock is **past** its slot rather than exactly on it, so a job is
+caught up rather than lost if the chain was down at the appointed minute. If a job fails, its
+claim is **released** so a later run retries the same day, and the run still ends red.
+
+To run one on demand, dispatch `Skool sync` with `force_hygiene` / `force_digest` / `deep`.
+Forcing skips the clock but still honours the claim, so it cannot double-post either.
 
 The deep scan lives **inside** the loop rather than in its own workflow on purpose: the loop is
 the single serialised writer, and Close's search index lags writes by minutes, so a deep scan
@@ -140,7 +167,7 @@ during Deep Idle, DarkWoke for ~45s with no DNS, and died on `socket.gaierror`.
 | `com.dealengine.skool-ghl-sync` | every 30 min | covered by the reconcile (which writes GHL too) |
 | `com.dealengine.skool-reconcile` | every 2 h | every 6th loop pass, `--pages 8` |
 | `com.dealengine.skool-ghl-deepscan` | nightly 04:30, never succeeded | daily 04:00 UTC inside the loop |
-| `com.dealengine.skool-daily-count` | daily 08:30 | `Skool maintenance` → `daily` job, 07:30 UTC |
+| `com.dealengine.skool-daily-count` | daily 08:30 | daily 07:30 UTC inside the loop |
 
 `com.dealengine.skool-cookie-refresh` is **not** replaced — it reads Chrome's cookie store on
 disk, which only exists on the Mac. It refreshes the local `.secrets/skool_cookie` file; the

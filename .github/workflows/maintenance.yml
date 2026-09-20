@@ -1,13 +1,19 @@
 name: Skool maintenance
 
-# Slower jobs that do not belong in the 5-minute sync chain. All of them are safe to miss
-# a run, so an ordinary cron is fine here - unlike the lead sync, where GitHub's dropped
-# schedules actually cost speed-to-lead, and which therefore self-dispatches instead.
+# BELT AND BRACES ONLY. The real schedule for all of this now lives inside the `Skool sync`
+# chain, which fires each job once a day off an atomic claim ref. These crons stay as a
+# fallback, but nothing depends on them any more.
 #
-# NOTE: the 60-page deep scan is deliberately NOT here. It lives inside the sync loop
-# (workflow `Skool sync`), because that loop is the single serialised writer and Close's
-# search index lags writes by minutes - a deep scan running concurrently with a 5-minute
-# pass would read "not in Close" for a lead the other pass had just created, and duplicate it.
+# WHY: this workflow had total_count == 0. BOTH of the daily join count's cron slots
+# (19 Sept 07:30 UTC, 20 Sept 06:20 UTC) were silently dropped by GitHub, so the number
+# that tells us the funnel is alive was never produced - while the launchd agent that used
+# to produce it had already been retired. That is the same dropped-cron problem the sync
+# chain was rebuilt to escape, and maintenance was still standing in it.
+#
+# The 60-page deep scan is deliberately not here either. Everything that writes lives inside
+# the sync loop, because that loop is the single serialised writer and Close's search index
+# lags writes by minutes - anything running concurrently with a 5-minute pass would read
+# "not in Close" for a lead that pass had just created, and duplicate it.
 on:
   schedule:
     - cron: "20 6 * * *"      # daily  06:20 UTC - pipeline hygiene
@@ -20,6 +26,17 @@ on:
         type: choice
         options: [both, hygiene, digest, daily]
         default: both
+
+# Same group as the sync chain, so pipeline_advance.py can never move cards while the loop
+# is creating them. This project has already been bitten once by two writers racing on Close.
+#
+# The consequence is that the chain, which is always live, will normally starve this workflow
+# out - a queued run here is superseded by the chain's next hand-off. That is deliberate and
+# costs nothing, because the chain already does this work on a claim. To run one of these ON
+# DEMAND, dispatch `Skool sync` with force_hygiene / force_digest instead of dispatching this.
+concurrency:
+  group: skool-sync
+  cancel-in-progress: false
 
 jobs:
   hygiene:
