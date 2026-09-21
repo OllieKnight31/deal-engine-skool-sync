@@ -39,15 +39,22 @@ def close(method, path, payload=None):
     r = urllib.request.Request("https://api.close.com/api/v1" + path,
         data=json.dumps(payload).encode() if payload is not None else None, method=method,
         headers={"Authorization": CLOSE_AUTH, "Content-Type": "application/json"})
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with urllib.request.urlopen(r, timeout=40) as resp: return resp.status, json.load(resp)
         except urllib.error.HTTPError as e:
-            try: return e.code, json.loads(e.read().decode() or "{}")
+            body = e.read().decode() or "{}"
+            # 429 and 5xx are "ask again", not answers. Returning them to the caller is how a
+            # rate-limited SEARCH got read as "this lead does not exist" and duplicated it.
+            if e.code == 429 or e.code >= 500:
+                if attempt < 3:
+                    wait = int(e.headers.get("Retry-After") or 0) or 5 * (attempt + 1)
+                    time.sleep(wait); continue
+            try: return e.code, json.loads(body)
             except Exception: return e.code, {}
         except Exception:
             # Transient - a dropped connection here used to abort the whole run.
-            if attempt == 2: raise
+            if attempt == 3: raise
             time.sleep(3 * (attempt + 1))
 
 def lead_by_id(lead_id):
@@ -60,12 +67,21 @@ def lead_by_id(lead_id):
     return d if s == 200 else None
 
 
+# Returned when the search itself failed. It is NOT the same as "no such lead": treating a
+# failed lookup as an absence is what creates duplicate leads, and a duplicate lead means a
+# second Slack alert for a person the team has already seen (Joshua Raj, 19 and 21 Sept).
+SEARCH_FAILED = object()
+
+
 def in_close(email):
     q = urllib.parse.quote(f'email:"{email}"')
     # "custom" pulls every custom field back as custom.cf_<id> keys - needed so we
     # can see whether Slack has already been told about this person.
     s, d = close("GET", f"/lead/?query={q}&_limit=1&_fields=id,display_name,custom")
-    return (d.get("data") or [None])[0] if s == 200 else None
+    if s != 200:
+        print(f"  close search FAILED for {email}: HTTP {s} - skipping rather than guessing")
+        return SEARCH_FAILED
+    return (d.get("data") or [None])[0]
 
 # ---- collapsed-contact state -------------------------------------------------
 # GitHub Actions starts from a clean checkout every run, so this file is an
@@ -234,8 +250,15 @@ def main():
     close_lead = {}
     miss_close, miss_ghl, collapsed = [], [], []
     recovered = 0
+    search_failures = 0
     for m in valid:
         lead = in_close(m["email"])
+        if lead is SEARCH_FAILED:
+            # Do not create, do not announce, do not mark missing. The next pass is ~3
+            # minutes away and every write here is idempotent, so losing one pass costs
+            # nothing; guessing costs a duplicate lead and a duplicate Slack alert.
+            search_failures += 1
+            continue
         if not lead:
             # Search says missing. Before believing it, check whether WE created this lead
             # within the index-lag window and re-read it by id.
@@ -264,6 +287,10 @@ def main():
             collapsed.append(m)
         else:
             miss_ghl.append(m)
+
+    if search_failures:
+        print(f"\nclose search failed for {search_failures} member(s) - they were skipped this "
+              f"pass and will be picked up on the next one")
 
     if stamp_existing:
         n = 0
