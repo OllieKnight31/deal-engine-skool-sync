@@ -76,6 +76,7 @@ jobs:
       #
       #   every pass   (~5 min)  reconcile_skool.py --pages 3  --fix   + phone normalise
       #   every 3rd    (~15 min) ghl_dfy_to_close.py --apply           <- was ghl-close-sync
+      #                          ghl_stage_mirror.py --apply           <- GHL stage -> Close
       #   every 6th    (~30 min) reconcile_skool.py --pages 8  --fix   <- was skool-reconcile
       #                                                                   and skool-ghl-sync
       #   once/day 04:00 UTC     reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
@@ -207,6 +208,11 @@ jobs:
             # lead list, so it is deliberately not run every 5.
             if [ $(( PASS % 3 )) -eq 1 ]; then
               python scripts/ghl_dfy_to_close.py --apply             || { FAILED=1; echo "::warning::ghl->close mirror failed on pass $PASS"; }
+              # Propagate STAGE changes GHL -> Close on the two mirrored boards. The line
+              # above only ever CREATES a card, so without this the boards agree the moment
+              # a lead arrives and drift apart the instant anything moves: on 21 Sept, 65
+              # people sat in "Welcome DM Sent" in GHL and 0 in Close, and the gap grew daily.
+              python scripts/ghl_stage_mirror.py --apply             || { FAILED=1; echo "::warning::stage mirror failed on pass $PASS"; }
             fi
             echo "::endgroup::"
 
