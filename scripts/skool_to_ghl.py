@@ -35,6 +35,11 @@ COMMUNITY = "portfolio-lab"
 # community size without paging the whole member list.
 LAST_TOTAL = None
 LAST_TOTAL_PAGES = None
+# True when the last pull_skool() walked all the way to Skool's own last page; False when it
+# stopped early because the `pages` cap ran out. Anything that reasons about the ABSENCE of a
+# member - departure detection above all - is only safe on a complete scan, because a member
+# beyond the cap is indistinguishable from one who left.
+LAST_SCAN_COMPLETE = False
 
 try:
     import phonenumbers
@@ -92,8 +97,12 @@ def clean_phone(raw, iso):
         except Exception: pass
     return None
 
-def pull_skool(pages):
+def pull_skool(pages=0):
     """Read the Skool members page over plain HTTP - no browser.
+
+    `pages` is a CAP, not a target: the walk always stops at Skool's own `totalPages`.
+    Pass 0 (the default) for "however many there are" - the community grows ~43/day, so any
+    hardcoded number silently stops covering the list. Check LAST_SCAN_COMPLETE afterwards.
 
     The members page is server-rendered, so a cookie-authenticated GET returns the
     whole record set in __NEXT_DATA__. Only auth_token + client_id are needed (the
@@ -118,8 +127,12 @@ def pull_skool(pages):
                          "automations/scripts/skool_cookie_from_disk.py")
     UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+    global LAST_SCAN_COMPLETE
+    LAST_SCAN_COMPLETE = False
+    # 0/None means "walk to the end"; the loop still terminates on totalPages.
+    cap = pages if (pages and pages > 0) else 10 ** 9
     out, n = [], 1
-    while n <= pages:
+    while n <= cap:
         req = urllib.request.Request(
             f"https://www.skool.com/{COMMUNITY}/-/members?p={n}",
             headers={"Cookie": cookie, "User-Agent": UA,
@@ -180,7 +193,9 @@ def pull_skool(pages):
         LAST_TOTAL = pp.get("total", LAST_TOTAL)
         LAST_TOTAL_PAGES = pp.get("totalPages", LAST_TOTAL_PAGES)
         total = pp.get("totalPages", n)
-        if n >= total: break
+        if n >= total:
+            LAST_SCAN_COMPLETE = True
+            break
         n += 1
     return out
 

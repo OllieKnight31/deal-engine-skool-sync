@@ -27,7 +27,7 @@ on:
         description: "seconds between passes"
         default: "120"
       deep:
-        description: "force the 60-page deep scan (still honours the once-a-day claim)"
+        description: "force the full-list deep scan (still honours the once-a-day claim)"
         type: boolean
         default: false
       force_hygiene:
@@ -58,7 +58,8 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 85           # loop budget 55m + headroom for a 60-page deep pass
+    timeout-minutes: 95           # loop budget 55m + headroom for a full-list deep pass
+                              # (63 pages on 21 Sept, and it grows - hence the extra 10m)
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +89,8 @@ jobs:
       # those by id (strongly consistent), so the interval no longer has to be longer than
       # Close's index lag. Real cadence is now ~2m40s-3m40s, and the tier divisors above were
       # re-cut so the heavier sweeps keep the 15- and 30-minute spacing they were chosen for.
-      #   once/day 04:00 UTC     reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
+      #   once/day 04:00 UTC     reconcile_skool.py --pages 0  --fix   <- was skool-ghl-deepscan
+      #                          (0 = all pages; see DEEP_PAGES below)
       #   once/day 06:20 UTC     pipeline_advance.py                   <- was maintenance.yml cron
       #   once/day 07:30 UTC     attribution_digest.py --days 1 --post <- was skool-daily-count
       #   Mondays  08:00 UTC     attribution_digest.py --days 7 --post <- was maintenance.yml cron
@@ -119,7 +121,9 @@ jobs:
           HYGIENE_AT:      "06:20"  # matches the maintenance.yml cron it supersedes
           DIGEST_AT:       "07:30"  # 08:30 London - matches com.dealengine.skool-daily-count
           WEEKLY_AT:       "08:00"  # Mondays only - matches the maintenance.yml cron
-          DEEP_PAGES:      "60"
+          # 0 = every page there is. The community was 63 pages on 21 Sept and grows ~43/day,
+          # so "60" had already stopped covering the list. Never hardcode this again.
+          DEEP_PAGES:      "0"
         run: |
           set -u
           END=$(( $(date +%s) + LOOP_MINUTES * 60 ))

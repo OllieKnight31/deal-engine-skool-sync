@@ -30,7 +30,9 @@ import json, os, re, sys, time, base64, urllib.request, urllib.error, urllib.par
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
+import skool_to_ghl
 from skool_to_ghl import pull_skool, ghl, LOC, PIPE
+import notify_slack
 
 CLOSE_KEY = os.environ["CLOSE_API_KEY"]
 CLOSE_AUTH = "Basic " + base64.b64encode((CLOSE_KEY + ":").encode()).decode()
@@ -53,7 +55,11 @@ GHL_UNRESP   = "de540151-9bb6-457d-904b-f558f0b71927"
 GHL_LEFT     = "129665c6-2876-4f00-ac90-6f1d16b33452"
 GHL_MOVEABLE = {GHL_NEW, GHL_DM_SENT}
 
-FULL_PAGES = int(os.environ.get("SKOOL_FULL_PAGES", "70"))   # 60 pages today; headroom
+# 0 = walk to Skool's own last page. It MUST NOT be a fixed number: departure detection asks
+# "is this handle absent from the community?", and a member sitting beyond a page cap is
+# indistinguishable from one who left. The community grows ~43/day, so the old "70" (2,100
+# members) would have started marking live members as departed within days of being written.
+FULL_PAGES = int(os.environ.get("SKOOL_FULL_PAGES", "0"))
 
 
 def close(method, path, payload=None):
@@ -172,11 +178,33 @@ def main():
     stale_days = int(sys.argv[sys.argv.index("--stale-days") + 1]) if "--stale-days" in sys.argv else 21
     max_moves = int(sys.argv[sys.argv.index("--max-moves") + 1]) if "--max-moves" in sys.argv else None
 
-    print(f"pulling the full Skool member list (up to {FULL_PAGES} pages)…")
+    print("pulling the full Skool member list "
+          f"({'every page' if not FULL_PAGES else f'up to {FULL_PAGES} pages'})…")
     members, handles, by_email = skool_snapshot()
-    print(f"  current members: {len(members)}  distinct handles: {len(handles)}")
+    total = skool_to_ghl.LAST_TOTAL
+    pages_seen = skool_to_ghl.LAST_TOTAL_PAGES
+    print(f"  current members: {len(members)}  distinct handles: {len(handles)}  "
+          f"(Skool reports {total} across {pages_seen} pages)")
+
+    # Three independent ways the scan can be too short to reason about absence. Any of them
+    # and we move NOTHING: a missed sweep costs a day, mass-marking live members as
+    # "Not A Fit / Left Community" in both CRMs costs a manual cleanup of up to 150 records.
+    problems = []
     if len(members) < 100:
-        print("refusing to act on a suspiciously short member list - aborting")
+        problems.append(f"suspiciously short member list ({len(members)})")
+    if not skool_to_ghl.LAST_SCAN_COMPLETE:
+        problems.append(f"scan stopped at the page cap, did not reach Skool's last page "
+                        f"(cap {FULL_PAGES or 'none'})")
+    if total and len(members) < total * 0.97:
+        problems.append(f"only saw {len(members)} of {total} members "
+                        f"({len(members)*100//max(total,1)}%)")
+    if problems:
+        msg = "; ".join(problems)
+        print(f"REFUSING TO MOVE ANY CARD - {msg}")
+        notify_slack.post_alert(
+            "Pipeline hygiene skipped - incomplete member scan", msg + 
+            "\n\nNo cards were moved. Departure detection needs the whole member list, "
+            "because a member beyond the scan looks identical to one who left.")
         raise SystemExit(1)
 
     print("reading Close cards…")
