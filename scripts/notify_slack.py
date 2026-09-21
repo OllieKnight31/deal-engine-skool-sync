@@ -101,6 +101,59 @@ def suspect_reason(m):
     return None
 
 
+# ── Scorecard ────────────────────────────────────────────────────────────────
+# Every lead event across Deal Engine posts as the same card, and the colour bar down its
+# left edge says which FUNNEL it came from. The relay owns the layout
+# (de-funnel-relay/api/_card.js); this is that layout in Python, because this repo cannot
+# import it. Change a colour or the block order there and change it here.
+#
+#   🟩 #2EB67D  Application        (relay  → #5-leads)
+#   🟪 #9B51E0  VSL opt-in         (relay  → #5-leads)
+#   🟦 #1D9BD1  Community join     (this   → #5-community-joins)
+#   🟧 #F2994A  Call booked        (relay  → #1-booked-calls)
+FUNNEL_COMMUNITY = {"label": "Community join", "color": "#1D9BD1", "chip": "🟦"}
+
+
+def esc(v):
+    """Skool answers are free text from strangers; unescaped, '<!channel>' pings everyone."""
+    return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def scorecard(funnel, title="", name="", contact="", stats=(), quote=None, notes=(),
+              links=(), footer="", heading=""):
+    """Header as a top-level block, the card body in one coloured attachment.
+
+    The split is deliberate: the colour bar only exists on attachments, and with top-level
+    blocks present Slack uses `text` purely as the notification fallback rather than
+    printing it above the card.
+    """
+    head = " · ".join(x for x in (heading or funnel["label"], title) if x)
+    blocks = [{"type": "header",
+               "text": {"type": "plain_text", "text": f"{funnel['chip']} {head}"[:150], "emoji": True}}]
+    body = []
+    if name:
+        body.append({"type": "section", "text": {"type": "mrkdwn",
+                     "text": f"*{name}*" + (f"\n{contact}" if contact else "")}})
+    cells = [{"type": "mrkdwn", "text": f"*{k}*\n{v}"[:2000]}
+             for k, v in stats if v is not None and str(v).strip()]
+    for i in range(0, len(cells), 10):          # Slack caps a section at 10 fields
+        body.append({"type": "section", "fields": cells[i:i + 10]})
+    if quote and str(quote[1] or "").strip():
+        quoted = "\n".join(">" + line for line in str(quote[1]).strip().splitlines() if line.strip())
+        body.append({"type": "section", "text": {"type": "mrkdwn",
+                     "text": f"*{quote[0]}*\n{quoted}"[:2900]}})
+    notes = [n for n in notes if n]
+    if notes:
+        body.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "\n".join(notes)}]})
+    buttons = [{"type": "button", "text": {"type": "plain_text", "text": label}, "url": url}
+               for label, url in links if url]
+    if buttons:
+        body.append({"type": "actions", "elements": buttons})
+    if footer:
+        body.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
+    return blocks, [{"color": funnel["color"], "blocks": body}]
+
+
 def _fmt_source(src):
     """Turn Skool's raw attribution token into something a human reads."""
     if not src:
@@ -118,7 +171,8 @@ def _fmt_source(src):
     return pretty.get(src, src)
 
 
-def _member_blocks(m, close_id=None, ghl_contact_id=None):
+def _member_card(m, close_id=None, ghl_contact_id=None):
+    """(blocks, attachments, fallback) for one new member."""
     name = f"{m.get('first') or ''} {m.get('last') or ''}".strip() or "(no name)"
     suspect = suspect_reason(m)
     handle = m.get("handle") or ""
@@ -137,65 +191,50 @@ def _member_blocks(m, close_id=None, ghl_contact_id=None):
             phone = ""
         if not phone:
             phone_note = str(m["phone_raw"]).strip()
-    why = (m.get("why") or "").strip()
-    loc = m.get("location") or ""
-
-    facts = []
-    if email:
-        facts.append(f"*Email*  <mailto:{email}|{email}>")
-    if phone:
-        facts.append(f"*Phone*  <tel:{phone}|{phone}>")
-    elif phone_note:
-        facts.append(f"*Phone answer*  _{phone_note[:120]}_  (not a dialable number)")
-    facts.append(f"*Found us via*  {_fmt_source(m.get('source'))}")
-    if loc:
-        facts.append(f"*Location*  {loc}")
     pts = m.get("points") or 0
-    if pts:
-        facts.append(f"*Engagement*  🔥 {pts} point{'s' if pts != 1 else ''} in the community "
-                     f"(level {m.get('level') or 1}) — warmer than a drive-by joiner")
 
-    icon = "⚠️" if suspect else "🟢"
-    blocks = [
-        {"type": "header",
-         "text": {"type": "plain_text", "text": f"{icon}  {name} joined the community", "emoji": True}},
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": "\n".join(facts)}},
+    stats = [
+        ("Email", f"<mailto:{email}|{esc(email)}>" if email else ""),
+        ("Phone", f"<tel:{phone}|{phone}>" if phone
+                  else (f"_{esc(phone_note[:120])}_  (not a dialable number)" if phone_note else "")),
+        ("Found us via", esc(_fmt_source(m.get("source")))),
+        ("Location", esc(m.get("location") or "")),
+        ("Engagement", f"🔥 {pts} point{'s' if pts != 1 else ''} · level {m.get('level') or 1}" if pts else ""),
     ]
+
+    notes = []
     if suspect:
-        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
-            "text": f"⚠️  *Looks like junk* — {suspect}. Synced anyway so nothing is lost; "
-                    f"tagged `skool-suspect` in GHL."}]})
+        notes.append(f"⚠️  *Looks like junk* — {suspect}. Synced anyway so nothing is lost; "
+                     f"tagged `skool-suspect` in GHL.")
+    if pts:
+        notes.append("_Already active in the community — warmer than a drive-by joiner._")
 
-    if why:
-        quoted = "\n".join("> " + line for line in why.splitlines() if line.strip())
-        blocks.append({"type": "section",
-                       "text": {"type": "mrkdwn", "text": f"*What they want*\n{quoted}"}})
-
-    buttons = []
-    if handle:
-        buttons.append({"type": "button", "text": {"type": "plain_text", "text": "Skool profile"},
-                        "url": f"https://www.skool.com/@{handle}"})
-    if ghl_contact_id:
-        buttons.append({"type": "button", "text": {"type": "plain_text", "text": "Open in GHL"},
-                        "url": f"https://app.gohighlevel.com/v2/location/{GHL_LOCATION}"
-                               f"/contacts/detail/{ghl_contact_id}"})
-    if close_id:
-        buttons.append({"type": "button", "text": {"type": "plain_text", "text": "Open in Close"},
-                        "url": f"https://app.close.com/lead/{close_id}/"})
-    if buttons:
-        blocks.append({"type": "actions", "elements": buttons})
-
-    return blocks, f"{name} joined the BRRRR community"
+    blocks, attachments = scorecard(
+        FUNNEL_COMMUNITY,
+        title="⚠️ looks like junk" if suspect else "",
+        name=esc(name),
+        stats=stats,
+        quote=("What they want", esc((m.get("why") or "").strip())),
+        notes=notes,
+        links=[
+            ("Skool profile", f"https://www.skool.com/@{handle}" if handle else None),
+            ("Open in GHL", f"https://app.gohighlevel.com/v2/location/{GHL_LOCATION}"
+                            f"/contacts/detail/{ghl_contact_id}" if ghl_contact_id else None),
+            ("Open in Close", f"https://app.close.com/lead/{close_id}/" if close_id else None),
+        ],
+        footer="4. Skool Free Community → New Member",
+    )
+    return blocks, attachments, f"{esc(name)} joined the BRRRR community"
 
 
 def post_member(m, close_id=None, ghl_contact_id=None):
     """Post one new member. Returns True when Slack accepted it."""
     if not enabled:
         return False
-    blocks, fallback = _member_blocks(m, close_id, ghl_contact_id)
+    blocks, attachments, fallback = _member_card(m, close_id, ghl_contact_id)
     r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL, "text": fallback,
-                                            "blocks": blocks, "unfurl_links": False}))
+                                            "blocks": blocks, "attachments": attachments,
+                                            "unfurl_links": False}))
     if not r.get("ok"):
         print(f"  slack post failed for {m.get('email')}: {r.get('error')}")
     return bool(r.get("ok"))
@@ -208,18 +247,20 @@ def post_digest(members, reason="backfill"):
     lines = []
     for m in members[:50]:
         name = f"{m.get('first') or ''} {m.get('last') or ''}".strip() or "(no name)"
-        lines.append(f"• *{name}* — {m.get('email','')} — via {_fmt_source(m.get('source'))}")
+        lines.append(f"• *{esc(name)}* — {esc(m.get('email',''))} — via {esc(_fmt_source(m.get('source')))}")
     more = f"\n…and {len(members)-50} more" if len(members) > 50 else ""
     r = _api("chat.postMessage", _identity({
         "channel": SLACK_CHANNEL,
         "text": f"{len(members)} new community members ({reason})",
         "blocks": [
             {"type": "header", "text": {"type": "plain_text",
-             "text": f"🟢  {len(members)} new community members", "emoji": True}},
+             "text": f"{FUNNEL_COMMUNITY['chip']} {len(members)} new community members", "emoji": True}},
+        ],
+        "attachments": [{"color": FUNNEL_COMMUNITY["color"], "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": ("\n".join(lines) + more)[:2900]}},
             {"type": "context", "elements": [{"type": "mrkdwn",
              "text": f"Posted as a digest rather than {len(members)} separate messages ({reason})."}]},
-            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines) + more}},
-        ],
+        ]}],
         "unfurl_links": False}))
     if not r.get("ok"):
         print(f"  slack digest failed: {r.get('error')}")
@@ -264,7 +305,7 @@ if __name__ == "__main__":
             print(f"  {flag} {c['email']:36} -> {got}")
         raise SystemExit
     ok = post_member(sample, close_id=None, ghl_contact_id=None) if "--post" in sys.argv else None
-    print(json.dumps(_member_blocks(sample)[0], indent=2) if ok is None else f"posted: {ok}")
+    print(json.dumps(_member_card(sample)[:2], indent=2) if ok is None else f"posted: {ok}")
 
 
 def post_alert(title, detail="", mention=False):
