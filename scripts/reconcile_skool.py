@@ -95,6 +95,45 @@ def save_collisions(collisions):
               f"detected live, just not remembered between runs")
 
 
+# ---- just-created-in-Close cache ---------------------------------------------
+# Close's SEARCH index lags writes by minutes, and in_close() is a search. So a lead
+# created on one pass can still be absent from search on the NEXT pass, and the
+# reconciler would create it a second time. That is how duplicate community leads got
+# into Close before (Tyler Pearson, Tyler Williams - both found and deleted by hand).
+#
+# At the old ~6-minute pass interval this was already a live risk; it is what made
+# shortening the interval unsafe. Remembering the lead id for a short window closes it:
+# a cached candidate is re-read with GET /lead/{id}, which is strongly consistent, so
+# the answer no longer depends on the index at all.
+#
+# Same storage semantics as the collision cache: shared by every pass of one CI run,
+# gone on the next checkout - which is fine, because the window it guards is minutes.
+CREATED_FILE = os.environ.get("SKOOL_CLOSE_CREATED") or os.path.join(
+    os.path.expanduser("~"), ".local", "state", "dealengine", "skool_close_created.json")
+CREATED_TTL_MIN = int(os.environ.get("CLOSE_INDEX_LAG_MIN", "30"))
+
+
+def load_created():
+    """email -> lead id, for leads created recently enough that search may not show them."""
+    try:
+        with open(CREATED_FILE) as fh:
+            raw = json.load(fh).get("created", {})
+    except Exception:
+        return {}
+    cutoff = time.time() - CREATED_TTL_MIN * 60
+    return {e: v for e, v in raw.items() if (v or {}).get("at", 0) > cutoff}
+
+
+def save_created(created):
+    try:
+        os.makedirs(os.path.dirname(CREATED_FILE), exist_ok=True)
+        with open(CREATED_FILE, "w") as fh:
+            json.dump({"created": created}, fh, indent=1, sort_keys=True)
+    except Exception as e:
+        print(f"  note: could not write {CREATED_FILE} ({e}) - a lead created in the last "
+              f"{CREATED_TTL_MIN} min could be created twice if search has not caught up")
+
+
 _GHL_EMAILS = None
 _GHL_CONTACT_BY_EMAIL = {}
 _GHL_EMAIL_BY_CONTACT = {}
@@ -191,10 +230,20 @@ def main():
     # Keep the Close lead we found for each member. It carries the "Slack Notified At"
     # stamp, which is what stops the team being pinged twice about the same person.
     collisions = load_collisions()
+    created = load_created()
     close_lead = {}
     miss_close, miss_ghl, collapsed = [], [], []
+    recovered = 0
     for m in valid:
         lead = in_close(m["email"])
+        if not lead:
+            # Search says missing. Before believing it, check whether WE created this lead
+            # within the index-lag window and re-read it by id.
+            cached = created.get(m["email"].lower())
+            if cached and cached.get("lead_id"):
+                lead = lead_by_id(cached["lead_id"])
+                if lead:
+                    recovered += 1
         close_lead[m["email"]] = lead
         if not lead: miss_close.append(m)
         if in_ghl(m["email"]):
@@ -226,6 +275,9 @@ def main():
               f"Slack will only post genuinely new joins from here.")
         return
 
+    if recovered:
+        print(f"note: {recovered} lead(s) were absent from Close SEARCH but confirmed by id "
+              f"- created within the last {CREATED_TTL_MIN} min, not duplicated\n")
     print(f"MISSING FROM CLOSE: {len(miss_close)}")
     for m in miss_close: print(f"   {(m['first'] or '')+' '+(m['last'] or ''):28} {m['email']:36} joined {m['joined'][:19] if m['joined'] else '?'}")
     print(f"\nMISSING FROM GHL  : {len(miss_ghl)}")
@@ -265,6 +317,8 @@ def main():
                                             "note":"Skool free community signup (reconciler)"})
             # Newly created, so it carries no notified stamp - Slack will pick it up below.
             close_lead[m["email"]] = {"id": d["id"]}
+            created[m["email"].lower()] = {"lead_id": d["id"], "at": time.time()}
+            save_created(created)
 
     ghl_contact = {}
     claimed = {}          # contact id -> the email that legitimately owns it this run

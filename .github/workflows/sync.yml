@@ -25,7 +25,7 @@ on:
         default: "55"
       interval:
         description: "seconds between passes"
-        default: "300"
+        default: "120"
       deep:
         description: "force the 60-page deep scan (still honours the once-a-day claim)"
         type: boolean
@@ -74,11 +74,20 @@ jobs:
       # The polling loop. Work is tiered so the 5-minute lead path stays fast while the
       # slower sweeps that used to be separate launchd agents still happen:
       #
-      #   every pass   (~5 min)  reconcile_skool.py --pages 3  --fix   + phone normalise
-      #   every 3rd    (~15 min) ghl_dfy_to_close.py --apply           <- was ghl-close-sync
+      #   every pass   (~3 min)  reconcile_skool.py --pages 3  --fix   + phone normalise
+      #   every 5th    (~15 min) ghl_dfy_to_close.py --apply           <- was ghl-close-sync
       #                          ghl_stage_mirror.py --apply           <- GHL stage -> Close
-      #   every 6th    (~30 min) reconcile_skool.py --pages 8  --fix   <- was skool-reconcile
+      #   every 10th   (~30 min) reconcile_skool.py --pages 8  --fix   <- was skool-reconcile
       #                                                                   and skool-ghl-sync
+      #
+      # INTERVAL WAS 300s AND IS NOW 120s. Measured on run 35564726300 the real pass-to-pass
+      # gap was 5m36s-6m42s: the 300s sleep plus 36-100s of work. The blocker on shortening
+      # it was NOT rate limits, it was Close: in_close() is a SEARCH, the search index lags
+      # writes by minutes, so a lead created on one pass could look missing on the next and
+      # be created twice. reconcile_skool.py now remembers what it just created and re-reads
+      # those by id (strongly consistent), so the interval no longer has to be longer than
+      # Close's index lag. Real cadence is now ~2m40s-3m40s, and the tier divisors above were
+      # re-cut so the heavier sweeps keep the 15- and 30-minute spacing they were chosen for.
       #   once/day 04:00 UTC     reconcile_skool.py --pages 60 --fix   <- was skool-ghl-deepscan
       #   once/day 06:20 UTC     pipeline_advance.py                   <- was maintenance.yml cron
       #   once/day 07:30 UTC     attribution_digest.py --days 1 --post <- was skool-daily-count
@@ -100,7 +109,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
           LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
-          INTERVAL:        ${{ inputs.interval || '300' }}
+          INTERVAL:        ${{ inputs.interval || '120' }}
           GH_TOKEN:        ${{ github.token }}
           FORCE_DEEP:      ${{ inputs.deep && 'yes' || 'no' }}
           FORCE_HYGIENE:   ${{ inputs.force_hygiene && 'yes' || 'no' }}
@@ -185,7 +194,7 @@ jobs:
           while :; do
             PASS=$((PASS+1))
             PAGES=3
-            [ $(( PASS % 6 )) -eq 0 ] && PAGES=8
+            [ $(( PASS % 10 )) -eq 0 ] && PAGES=8
 
             # 10# on both sides: an hour written "04" or "08" must still compare correctly,
             # and bare $((08)) is an octal error in bash. Recomputed every pass so a run
@@ -205,8 +214,8 @@ jobs:
 
             # Mirrors the GHL Setter Pipeline (DFY / Mentorship applications) into Close.
             # 15 minutes matches the launchd agent it replaces; it pages the whole Close
-            # lead list, so it is deliberately not run every 5.
-            if [ $(( PASS % 3 )) -eq 1 ]; then
+            # lead list, so it is deliberately not run on every pass.
+            if [ $(( PASS % 5 )) -eq 1 ]; then
               python scripts/ghl_dfy_to_close.py --apply             || { FAILED=1; echo "::warning::ghl->close mirror failed on pass $PASS"; }
               # Propagate STAGE changes GHL -> Close on the two mirrored boards. The line
               # above only ever CREATES a card, so without this the boards agree the moment
