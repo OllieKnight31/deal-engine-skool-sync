@@ -130,7 +130,7 @@ jobs:
         run: |
           set -u
           END=$(( $(date +%s) + LOOP_MINUTES * 60 ))
-          FAILED=0; PASS=0
+          FAILED=0; PASS=0; SKIPPED=0
           DONE_deepscan=0; DONE_hygiene=0; DONE_digest=0; DONE_weekly=0
 
           # --- once-a-day jobs, guarded by an ATOMIC server-side claim ------------------
@@ -222,7 +222,22 @@ jobs:
             # the whole Skool intake stopped until someone force-cancelled it by hand. A
             # single hung HTTP call must cost one pass, not the chain. `timeout` exits 124,
             # which the existing `||` branches already treat as a failed pass.
-            timeout 300 python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed or timed out on pass $PASS"; }
+            # Exit 75 (EX_TEMPFAIL) is reconcile_skool.py saying "Skool's WAF is refusing me,
+            # I skipped this pass" - a deliberate, designed outcome, not a fault. It already
+            # counts consecutive skips itself and alarms in Slack only after three in a row.
+            # Treating it as a failure here would paint every run red on a single 40ms 403,
+            # and a run colour that is red most of the time tells nobody anything the next
+            # time it is red for a real reason.
+            RC=0; timeout 300 python scripts/reconcile_skool.py --pages "$PAGES" --fix || RC=$?
+            if [ "$RC" = "0" ]; then
+              :
+            elif [ "$RC" = "75" ]; then
+              SKIPPED=$((SKIPPED+1))
+              echo "::notice::Skool unavailable - pass $PASS skipped (the script alarms if this persists)"
+            else
+              FAILED=1
+              echo "::warning::reconcile (pages $PAGES) failed or timed out on pass $PASS (exit $RC)"
+            fi
             timeout 300 python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed or timed out on pass $PASS"; }
 
             # Mirrors the GHL Setter Pipeline (DFY / Mentorship applications) into Close.
@@ -276,6 +291,14 @@ jobs:
             sleep "$INTERVAL"
           done
 
+          # A skip is fine; a run where EVERY pass was skipped did no work at all, and that
+          # must be red however politely each individual pass declined.
+          if [ "$PASS" -gt 0 ] && [ "$SKIPPED" -eq "$PASS" ]; then
+            FAILED=1
+            echo "::error::all $PASS passes skipped - Skool was unavailable for this entire run"
+          fi
+
+          echo "skipped $SKIPPED of $PASS passes"
           echo "completed $PASS passes; deepscan=$DONE_deepscan hygiene=$DONE_hygiene digest=$DONE_digest weekly=$DONE_weekly"
           exit $FAILED
 
