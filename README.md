@@ -44,7 +44,8 @@ load-balancer cookies are not — and `auth_token` lasts ~364 days. That is what
 | `CLOSE_API_KEY` | Close API key (org **DealEngine**) |
 | `GHL_PIT` | GoHighLevel Private Integration token, sub-account AA StrategyWorks |
 | `SLACK_BOT_TOKEN` | `xoxb-…` for the **Workspace Builder** app (`chat:write`). Absent = notifications silently skipped, sync still runs |
-| `SLACK_CHANNEL` | Channel id, `C0C2WAXFH50` = `#1-de-community-joins` |
+| `SLACK_CHANNEL` | Channel id, `C0C2WAXFH50` = `#5-community-joins` (member cards, daily count, digests) |
+| `SLACK_ALERT_CHANNEL` | Optional. Where crash / unavailable / recovered alerts go. Default `C0C2TKXLV6W` = `#5-ops-alerts` |
 
 **Rotate `SKOOL_COOKIE` if the Skool password changes.** If the session expires the run fails
 loudly with *"Skool redirected page N to …/about: the session cookie is no longer accepted"*

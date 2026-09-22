@@ -17,6 +17,7 @@ without reading logs.
 Env:
   SLACK_BOT_TOKEN   xoxb- token with chat:write (required; absent = no-op)
   SLACK_CHANNEL     channel id, default the Deal Engine community channel
+  SLACK_ALERT_CHANNEL  where post_alert / post_note go, default #5-ops-alerts
   SLACK_NOTIFY_MAX  above this many new members in one run, post a single
                     digest instead of flooding the channel (default 8)
 """
@@ -25,6 +26,11 @@ from datetime import datetime, timezone
 
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "C0C2WAXFH50")   # #5-community-joins
+# Alarms go to the ops channel, not the lead feed. Until 22 Sept 2026 every "sync crashed"
+# post landed in #5-community-joins between the member cards, where the people who can fix
+# an automation are not the people reading joins. #5-ops-alerts exists for exactly this
+# ("Failed automations, broken webhooks, integration errors") and had never received a post.
+SLACK_ALERT_CHANNEL = os.environ.get("SLACK_ALERT_CHANNEL", "C0C2TKXLV6W")   # #5-ops-alerts
 # Always address the channel by ID, never by name: this channel has already been renamed once
 # (#1-de-community-joins -> #5-community-joins on 18 Sept) and a name-based config would have
 # broken silently. The ID is stable across renames.
@@ -336,7 +342,7 @@ def post_alert(title, detail="", mention=False, hint=None, header="🚨  Skool s
                        "text": {"type": "mrkdwn", "text": f"```{str(detail)[:2500]}```"}})
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
                                                     "text": hint or DEFAULT_HINT}]})
-    r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL,
+    r = _api("chat.postMessage", _identity({"channel": SLACK_ALERT_CHANNEL,
                                             "text": f"{header.strip()}: {title}",
                                             "blocks": blocks}))
     return bool(r.get("ok"))
