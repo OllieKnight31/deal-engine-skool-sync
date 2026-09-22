@@ -58,8 +58,11 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 95           # loop budget 55m + headroom for a full-list deep pass
-                              # (63 pages on 21 Sept, and it grows - hence the extra 10m)
+    # 95 = 55m loop + headroom for a full-list deep pass (63 pages on 21 Sept, and growing).
+    # Kept at 95 rather than cut back, because the job timeout is no longer the thing keeping
+    # a run honest - every python call below now has its own `timeout`, so the loop cannot
+    # run away even when one call hangs. This is the backstop, not the guard.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
 
@@ -213,19 +216,25 @@ jobs:
             if [ "$FORCE_DIGEST"  = "yes" ]; then DIG_HM=0;  fi
 
             echo "::group::pass $PASS  $(date -u +%H:%M:%SZ)  pages=$PAGES  utc_min=$NOW_HM  deep@$DEEP_HM/$DONE_deepscan  hygiene@$HYG_HM/$DONE_hygiene  digest@$DIG_HM/$DONE_digest"
-            python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed on pass $PASS"; }
-            python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed on pass $PASS"; }
+            # EVERY python call is wrapped in `timeout`. This is what actually went wrong on
+            # 22 Sept: a pass hung on a socket with no deadline, the run sat at 92 minutes
+            # against a 55-minute budget, and because `concurrency` lets nothing else start,
+            # the whole Skool intake stopped until someone force-cancelled it by hand. A
+            # single hung HTTP call must cost one pass, not the chain. `timeout` exits 124,
+            # which the existing `||` branches already treat as a failed pass.
+            timeout 300 python scripts/reconcile_skool.py --pages "$PAGES" --fix || { FAILED=1; echo "::warning::reconcile (pages $PAGES) failed or timed out on pass $PASS"; }
+            timeout 300 python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed or timed out on pass $PASS"; }
 
             # Mirrors the GHL Setter Pipeline (DFY / Mentorship applications) into Close.
             # 15 minutes matches the launchd agent it replaces; it pages the whole Close
             # lead list, so it is deliberately not run on every pass.
             if [ $(( PASS % 5 )) -eq 1 ]; then
-              python scripts/ghl_dfy_to_close.py --apply             || { FAILED=1; echo "::warning::ghl->close mirror failed on pass $PASS"; }
+              timeout 420 python scripts/ghl_dfy_to_close.py --apply || { FAILED=1; echo "::warning::ghl->close mirror failed or timed out on pass $PASS"; }
               # Propagate STAGE changes GHL -> Close on the two mirrored boards. The line
               # above only ever CREATES a card, so without this the boards agree the moment
               # a lead arrives and drift apart the instant anything moves: on 21 Sept, 65
               # people sat in "Welcome DM Sent" in GHL and 0 in Close, and the gap grew daily.
-              python scripts/ghl_stage_mirror.py --apply             || { FAILED=1; echo "::warning::stage mirror failed on pass $PASS"; }
+              timeout 420 python scripts/ghl_stage_mirror.py --apply || { FAILED=1; echo "::warning::stage mirror failed or timed out on pass $PASS"; }
             fi
             echo "::endgroup::"
 
@@ -236,19 +245,19 @@ jobs:
             # minutes, so anything running CONCURRENTLY with the 5-minute pass would read
             # "not in Close" for a lead that pass had just created, and duplicate it.
             daily deepscan "$DEEP_HM" "DEEP SCAN  $DEEP_PAGES pages" \
-              python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix
+              timeout 2400 python scripts/reconcile_skool.py --pages "$DEEP_PAGES" --fix
 
             # Pipeline hygiene. Repair the Skool Profile URLs first - departure detection
             # keys on the handle, and leads the old Zap created never had that field mapped.
             daily hygiene "$HYG_HM" "PIPELINE HYGIENE" \
-              bash -c 'python scripts/pipeline_advance.py --repair-urls --apply &&
-                       python scripts/pipeline_advance.py --apply --stale-days 21 --max-moves 150'
+              bash -c 'timeout 900 python scripts/pipeline_advance.py --repair-urls --apply &&
+                       timeout 900 python scripts/pipeline_advance.py --apply --stale-days 21 --max-moves 150'
 
             # The daily join count. This is the number that tells us the funnel is alive,
             # and it posts to Slack - which is exactly why the claim above has to be atomic
             # rather than a flag in this shell.
             daily digest "$DIG_HM" "DAILY JOIN COUNT" \
-              python scripts/attribution_digest.py --days 1 --post
+              timeout 600 python scripts/attribution_digest.py --days 1 --post
 
             # The Monday attribution digest. Same once-a-day claim - the claim key is the
             # date, and there is only one Monday per week, so it needs no new mechanism.
@@ -257,7 +266,7 @@ jobs:
             # by the chain's next hand-off and cannot be depended on.
             if [ "$(date -u +%u)" = "1" ] || [ "$FORCE_WEEKLY" = "yes" ]; then
               daily weekly "$WEEKLY_HM" "WEEKLY ATTRIBUTION DIGEST" \
-                python scripts/attribution_digest.py --days 7 --post
+                timeout 600 python scripts/attribution_digest.py --days 7 --post
             fi
 
             # Explicit, because `[ ... ] && sleep` as the loop's last command returns 1 on
