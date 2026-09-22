@@ -21,7 +21,7 @@ alone. Nothing is merged or deleted - there are two real people-records behind i
 import json, re, sys, os, time, base64, datetime, urllib.request, urllib.error, urllib.parse
 
 sys.path.insert(0, os.path.dirname(__file__))
-from skool_to_ghl import (pull_skool, ghl, clean_phone, iso_from_location, EMAIL_RE,
+from skool_to_ghl import (pull_skool, SkoolUnavailable, ghl, clean_phone, iso_from_location, EMAIL_RE,
                           LOC, PIPE, STAGE, CF)
 import notify_slack
 
@@ -225,6 +225,32 @@ def ghl_contact_id(email, collisions=None):
     rec = (collisions or {}).get((email or "").lower())
     return rec.get("contact_id") if rec else None
 
+# Consecutive passes on which Skool itself was unavailable (a 403 from its WAF, a 5xx, a
+# timeout). Kept in a file because every pass is its own process. The checkout persists for
+# the life of one CI run, so a fresh run starts the count again - which is the right shape:
+# a block that outlasts a run re-alarms about hourly instead of every three minutes.
+STATE_DIR = os.environ.get("SKOOL_STATE_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", ".state")
+UNAVAILABLE_FILE = os.path.join(STATE_DIR, "skool_unavailable_passes")
+UNAVAILABLE_ALERT_AFTER = int(os.environ.get("SKOOL_UNAVAILABLE_ALERT_AFTER", "3"))
+
+
+def _unavailable_count():
+    try:
+        return int(open(UNAVAILABLE_FILE).read().strip() or 0)
+    except Exception:
+        return 0
+
+
+def _unavailable_set(n):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if n:
+        with open(UNAVAILABLE_FILE, "w") as fh:
+            fh.write(str(n))
+    elif os.path.exists(UNAVAILABLE_FILE):
+        os.unlink(UNAVAILABLE_FILE)
+
+
 def main():
     pages = 2
     if "--pages" in sys.argv: pages = int(sys.argv[sys.argv.index("--pages")+1])
@@ -233,6 +259,15 @@ def main():
     stamp_existing = "--stamp-existing" in sys.argv
 
     members = pull_skool(pages)
+    # Skool answered. If earlier passes had to be skipped, close the loop in Slack so the
+    # alarm is never left standing - and only if an alarm actually went out.
+    prior = _unavailable_count()
+    if prior:
+        _unavailable_set(0)
+        if prior >= UNAVAILABLE_ALERT_AFTER:
+            notify_slack.post_note("Skool is answering again",
+                                   f"{prior} passes were skipped while it was not. This pass "
+                                   f"syncs the backlog - nothing was lost.")
     valid = [m for m in members if m["email"] and EMAIL_RE.match(m["email"])]
     print(f"skool members checked: {len(members)} | with valid email: {len(valid)}\n")
 
@@ -449,11 +484,28 @@ def main():
                     print(f"  WARNING: stamp failed for {m['email']} - it will re-announce")
                 print(f"  slack announced {m['email']}")
 
-if __name__ == "__main__":
+def run():
     # Any unhandled failure is announced before it propagates. The job still exits
     # non-zero so CI goes red too - Slack is the alarm, the exit code is the record.
     try:
         main()
+    except SkoolUnavailable as e:
+        # Skool refused or failed to answer, and the cookie is NOT the reason (see the class
+        # docstring in skool_to_ghl.py). Skip this pass: the next one retries and every write
+        # is idempotent, so joins are delayed, not lost. Alarm only once it persists, and say
+        # what it actually is - the crash handler below used to blame the cookie for a 403
+        # and sent a human off to rotate a secret that was working the whole time (22 Sept).
+        n = _unavailable_count() + 1
+        _unavailable_set(n)
+        print(f"SKOOL UNAVAILABLE - pass skipped ({e}); consecutive passes: {n}")
+        if n == UNAVAILABLE_ALERT_AFTER or (n > UNAVAILABLE_ALERT_AFTER and n % 20 == 0):
+            notify_slack.post_alert(
+                f"Skool has not answered for {n} passes in a row", str(e), mention=True,
+                hint=("This is on Skool's side - its CloudFront WAF refusing the runner, or an "
+                      "outage - *not* the cookie. A dead cookie shows as a redirect to /about, "
+                      "never a 403. Nothing to rotate. Joins are delayed, not lost: every pass "
+                      "retries and backfills as soon as Skool answers again."))
+        sys.exit(75)   # EX_TEMPFAIL - a red pass, not a crash
     except SystemExit as e:
         if e.code not in (0, None):
             notify_slack.post_alert("Skool sync aborted", e.code, mention=True)
@@ -462,3 +514,7 @@ if __name__ == "__main__":
         import traceback
         notify_slack.post_alert("Skool sync crashed", traceback.format_exc()[-2000:], mention=True)
         raise
+
+
+if __name__ == "__main__":
+    run()

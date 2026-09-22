@@ -97,6 +97,73 @@ def clean_phone(raw, iso):
         except Exception: pass
     return None
 
+class SkoolUnavailable(Exception):
+    """Skool did not serve the members page, and the credential is NOT the reason.
+
+    Measured 22 Sept 2026 from a GitHub runner, same cookie, minutes apart:
+      cookie + browser UA        -> 200, __NEXT_DATA__ present (three times running)
+      no cookie                  -> 307 to /<community>/about   <- what a DEAD SESSION looks like
+      cookie + non-browser UA    -> 403 from CloudFront          <- what the WAF looks like
+    So a 403 is Skool's AWS WAF / CloudFront edge refusing the request (server: CloudFront,
+    x-cache: Error from cloudfront). The 06:25 and 06:28 UTC crashes that day were exactly
+    that, and the alert blamed the cookie and sent a human off to rotate a secret that was
+    working the whole time. A 403, 429, 5xx or a timeout is transient: retry, skip the pass,
+    and only alarm when it persists. Rotating the cookie does nothing for it.
+    """
+    def __init__(self, status, detail):
+        super().__init__(f"HTTP {status}: {detail}" if status else detail)
+        self.status, self.detail = status, detail
+
+
+# Seconds between attempts at one page: 5+10+20 = 35s, plus at most 4 x 30s of socket
+# timeout = 155s worst case per page, which leaves room for the other two pages of a pass
+# inside the 300s `timeout` that sync.yml wraps every pass in. Deliberately short: a WAF
+# block usually outlasts one pass anyway, so the real retry is the NEXT pass, ~3 minutes
+# later, and the pass counter in reconcile_skool.py is what decides when to alarm.
+# Override with SKOOL_RETRY_BACKOFF="0,0" in tests.
+_BACKOFF = [int(x) for x in os.environ.get("SKOOL_RETRY_BACKOFF", "5,10,20").split(",") if x.strip() != ""]
+TRANSIENT_STATUSES = {403, 408, 425, 429, 500, 502, 503, 504}
+
+
+def _fetch_members_page(cookie, n, ua):
+    """One members page as HTML.
+
+    Raises SkoolUnavailable for a transient upstream failure (see the class) and SystemExit
+    when the session itself is rejected - the one case where SKOOL_COOKIE needs rotating.
+    """
+    req = urllib.request.Request(
+        f"https://www.skool.com/{COMMUNITY}/-/members?p={n}",
+        headers={"Cookie": cookie, "User-Agent": ua,
+                 "Accept": "text/html,application/xhtml+xml"})
+    last = None
+    for attempt in range(len(_BACKOFF) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                final = resp.geturl()
+                html = resp.read().decode("utf-8", "replace")
+            # A dead cookie is a REDIRECT (307 -> /about), never an error status. urllib
+            # follows it, so the tell is landing anywhere other than the members page.
+            if "/-/members" not in final:
+                raise SystemExit(
+                    f"Skool redirected page {n} to {final}: the session cookie is no longer "
+                    f"accepted. Rotate SKOOL_COOKIE - on the Mac run "
+                    f"automations/scripts/skool_cookie_from_disk.py --push-secret.")
+            return html
+        except urllib.error.HTTPError as e:
+            edge = ", ".join(f"{h}={e.headers.get(h)}" for h in ("server", "x-cache")
+                             if e.headers is not None and e.headers.get(h))
+            last = SkoolUnavailable(e.code, f"page {n} ({edge or 'no edge headers'})")
+            if e.code not in TRANSIENT_STATUSES:
+                raise last
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = SkoolUnavailable(None, f"page {n}: {type(e).__name__}: {str(e)[:120]}")
+        if attempt < len(_BACKOFF):
+            wait = _BACKOFF[attempt]
+            print(f"  skool page {n} attempt {attempt + 1} failed ({last}); retrying in {wait}s")
+            time.sleep(wait)
+    raise last
+
+
 def pull_skool(pages=0):
     """Read the Skool members page over plain HTTP - no browser.
 
@@ -133,28 +200,11 @@ def pull_skool(pages=0):
     cap = pages if (pages and pages > 0) else 10 ** 9
     out, n = [], 1
     while n <= cap:
-        req = urllib.request.Request(
-            f"https://www.skool.com/{COMMUNITY}/-/members?p={n}",
-            headers={"Cookie": cookie, "User-Agent": UA,
-                     "Accept": "text/html,application/xhtml+xml"})
-        # Skool intermittently stalls a page request. Without a retry one slow
-        # response killed the entire run, and a scheduled run that dies part-way
-        # leaves members in one CRM and not the other.
-        html = None
-        for attempt in range(4):
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    html = resp.read().decode("utf-8", "replace")
-                break
-            except Exception as e:
-                if attempt == 3:
-                    raise
-                wait = 3 * (attempt + 1)
-                print(f"  skool page {n} attempt {attempt+1} failed ({e}); retrying in {wait}s")
-                time.sleep(wait)
+        html = _fetch_members_page(cookie, n, UA)
         m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.S)
         if not m:
-            raise SystemExit(f"No __NEXT_DATA__ on page {n} - the Skool session has probably expired.")
+            raise SystemExit(f"No __NEXT_DATA__ on page {n} - Skool served the members URL without "
+                             f"member data (session rejected without a redirect, or the page changed).")
         pp = json.loads(m.group(1)).get("props", {}).get("pageProps", {})
         for u in pp.get("users", []):
             mem = u.get("member") or {}

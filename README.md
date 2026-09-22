@@ -47,7 +47,19 @@ load-balancer cookies are not — and `auth_token` lasts ~364 days. That is what
 | `SLACK_CHANNEL` | Channel id, `C0C2WAXFH50` = `#1-de-community-joins` |
 
 **Rotate `SKOOL_COOKIE` if the Skool password changes.** If the session expires the run fails
-loudly with *"the Skool session has probably expired"* rather than silently syncing nothing.
+loudly with *"Skool redirected page N to …/about: the session cookie is no longer accepted"*
+rather than silently syncing nothing.
+
+**A `403` is NOT the cookie.** Measured 22 Sept 2026 from a GitHub runner with the very secret
+the sync uses: a dead or missing cookie is answered with a **307 redirect to `/about`**, never a
+403. A 403 comes from CloudFront itself (`server: CloudFront`, `x-cache: Error from cloudfront`):
+Skool's AWS WAF refusing the runner, and the same cookie got 200 from the same runner minutes
+later. The sync now treats 403 / 429 / 5xx / timeouts as transient (`SkoolUnavailable`): it
+retries the page (5 s, 10 s, 20 s), then skips the pass with exit 75 and lets the next pass
+retry. Slack is only told after **3 consecutive skipped passes** (~10 min), the alert says it is
+Skool's side and nothing needs rotating, and a "recovered" note follows when Skool answers again.
+Before rotating anything, run the **Skool probe** workflow (Actions → *Skool probe* → Run): it
+shows which of the two shapes you actually have.
 
 ## Local use
 

@@ -1,0 +1,42 @@
+name: Skool probe
+
+# Run this BEFORE rotating SKOOL_COOKIE. It fetches the members page from a GitHub runner
+# with the secret the sync uses and shows which of the two failure shapes you have:
+#
+#   status=200, next_data_present=1          the secret works; a 403 in the sync was Skool's
+#                                            CloudFront WAF refusing the runner - transient,
+#                                            nothing to rotate (seen 22 Sept 2026, 06:25 UTC)
+#   status=307 -> /portfolio-lab/about       the session is dead - rotate the secret with
+#                                            automations/scripts/skool_cookie_from_disk.py --push-secret
+#   status=403 with cookie + browser UA      the WAF is blocking the runner right now; wait,
+#                                            re-run in a few minutes
+#
+# The last probe deliberately sends a non-browser User-Agent to show what a WAF 403 looks
+# like (server: CloudFront, x-cache: Error from cloudfront) so it can be told apart.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - env:
+          SKOOL_COOKIE: ${{ secrets.SKOOL_COOKIE }}
+        run: |
+          echo "runner egress ip: $(curl -s --max-time 10 https://api.ipify.org)"
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+          probe() {
+            curl -s -o body.html -D headers.txt -w "status=%{http_code} time=%{time_total}s\n" --max-time 60 "$@" \
+              "https://www.skool.com/portfolio-lab/-/members?p=1" || echo "curl exit $?"
+            grep -i -E "^(HTTP|server|via|x-cache|location|content-type)" headers.txt | cut -c1-140
+            echo "next_data_present=$(grep -c __NEXT_DATA__ body.html || true)  body_bytes=$(wc -c < body.html)"
+            echo "--- body head ---"; head -c 600 body.html | tr -d '\r' | sed 's/<[^>]*>/ /g' | tr -s ' \n' | cut -c1-600; echo
+          }
+          for i in 1 2 3; do
+            echo "=== attempt $i: secret cookie + browser UA (this is what the sync sends) ==="
+            probe -H "Cookie: $SKOOL_COOKIE" -H "User-Agent: $UA" -H "Accept: text/html,application/xhtml+xml"
+            sleep 4
+          done
+          echo "=== no cookie (what a dead session looks like) ==="; probe -H "User-Agent: $UA"
+          echo "=== non-browser UA (what a WAF block looks like) ==="; probe -H "Cookie: $SKOOL_COOKIE" -H "User-Agent: Python-urllib/3.12"

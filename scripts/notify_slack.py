@@ -308,7 +308,19 @@ if __name__ == "__main__":
     print(json.dumps(_member_card(sample)[:2], indent=2) if ok is None else f"posted: {ok}")
 
 
-def post_alert(title, detail="", mention=False):
+# The footer used to say "most likely cause: the cookie - rotate SKOOL_COOKIE" under EVERY
+# alert. On 22 Sept 2026 it said that under a 403 that was Skool's WAF, and the cookie was
+# fine. The footer now tells the reader how to tell the two apart, and the transient path
+# passes its own hint instead.
+DEFAULT_HINT = (
+    "New community members are *not* reaching the CRMs or this channel until this is fixed. "
+    "Read the detail before touching anything: `Skool redirected ... to /about` means the "
+    "session cookie is dead - only then rotate the `SKOOL_COOKIE` repo secret "
+    "(`skool_cookie_from_disk.py --push-secret` on the Mac). A `403` is Skool's CloudFront "
+    "WAF refusing the runner; it clears on its own and the sync retries it every pass.")
+
+
+def post_alert(title, detail="", mention=False, hint=None, header="🚨  Skool sync problem"):
     """Loud failure alarm. Nobody watches the Actions tab, so a broken sync has to
     come and find someone - otherwise it looks identical to a quiet week."""
     if not enabled:
@@ -316,17 +328,22 @@ def post_alert(title, detail="", mention=False):
         return False
     head = ("<!channel> " if mention else "") + f"*{title}*"
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "🚨  Skool sync problem", "emoji": True}},
+        {"type": "header", "text": {"type": "plain_text", "text": header, "emoji": True}},
         {"type": "section", "text": {"type": "mrkdwn", "text": head}},
     ]
     if detail:
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": f"```{str(detail)[:2500]}```"}})
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
-        "text": "New community members are *not* reaching the CRMs or this channel until this is fixed. "
-                "Most likely cause: the Skool session cookie was invalidated by a password change — "
-                "rotate the `SKOOL_COOKIE` repo secret."}]})
+                                                    "text": hint or DEFAULT_HINT}]})
     r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL,
-                                            "text": f"Skool sync problem: {title}",
+                                            "text": f"{header.strip()}: {title}",
                                             "blocks": blocks}))
     return bool(r.get("ok"))
+
+
+def post_note(title, detail=""):
+    """Quiet follow-up, no mention - e.g. "recovered" - so an alarm is never left standing
+    in the channel after the thing it warned about has cleared."""
+    return post_alert(title, detail, mention=False, hint="No action needed.",
+                      header="✅  Skool sync recovered")
