@@ -81,8 +81,11 @@ with Actions → *Automation health* → Run (tick *always* to see the report in
 
 ```bash
 pip install -r requirements.txt
+# On the studio Mac the keys live in the client folder, not in the shell - load them first,
+# or every Close call 401s and the health check reads "48 unreadable searches", which looks
+# exactly like a dead key: set -a; . ../../.secrets/sync.env; set +a
 export SKOOL_COOKIE="auth_token=…; client_id=…"
-export CLOSE_API_KEY=… GHL_PIT=…
+export CLOSE_API_KEY=… GHL_PIT=…      # (already exported by sync.env on the Mac)
 python scripts/reconcile_skool.py --pages 2          # report only
 python scripts/reconcile_skool.py --pages 2 --fix    # backfill both CRMs
 ```
