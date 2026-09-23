@@ -310,4 +310,12 @@ jobs:
         if: ${{ !cancelled() && (inputs.handoff == null || inputs.handoff) }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run sync.yml --repo "$GITHUB_REPOSITORY" --ref main
+        run: |
+          gh workflow run sync.yml --repo "$GITHUB_REPOSITORY" --ref main
+          # The health check rides the hand-off too. health.yml was written to fire on
+          # workflow_run when this run completes, and it never did (run #105, 23 Sept):
+          # GitHub suppresses events raised by runs that GITHUB_TOKEN itself dispatched,
+          # which is every run in this chain. workflow_dispatch is the one trigger that
+          # rule exempts - the same reason the line above works at all.
+          gh workflow run health.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            || echo "::warning::could not dispatch the health check - its 3-hourly cron is the only backstop"

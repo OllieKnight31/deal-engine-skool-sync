@@ -6,10 +6,17 @@ name: Automation health
 # that sleeps with the laptop is not a watcher. Everything it watches already runs in the
 # cloud (this repo's chain, the Vercel relay), so the watcher lives here too.
 #
-# Trigger: after EVERY completed "Skool sync" run (workflow_run fires on the event, so it is
-# roughly hourly and does not depend on GitHub's best-effort cron), plus a 3-hourly cron as
-# a backstop for the case where the chain itself is down - which is precisely the case the
-# alarm exists for. The two collapse under one concurrency group.
+# Trigger: the Skool sync chain DISPATCHES this workflow from its hand-off step at the end of
+# every run (~hourly), plus a 3-hourly cron as a backstop for the case where the chain itself
+# is down - which is precisely the case the alarm exists for. All of it collapses under one
+# concurrency group.
+#
+# The workflow_run trigger below looked like the obvious way to do this and DID NOT FIRE
+# (sync run #105 completed 04:19 UTC on 23 Sept, nothing followed). GitHub suppresses events
+# raised by runs that GITHUB_TOKEN itself started, and every run in the chain is started that
+# way by its predecessor. workflow_dispatch is exempt from that rule, so the hand-off calls
+# `gh workflow run health.yml` explicitly. workflow_run is kept only for the case where a
+# human starts a sync run by hand.
 #
 # Posting rule: only on FAILURE, except once a day when it also posts "all checks passing".
 # That daily proof-of-life uses the same atomic claim ref the once-a-day sync jobs use
