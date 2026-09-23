@@ -11,12 +11,13 @@ name: Automation health
 # is down - which is precisely the case the alarm exists for. All of it collapses under one
 # concurrency group.
 #
-# The workflow_run trigger below looked like the obvious way to do this and DID NOT FIRE
-# (sync run #105 completed 04:19 UTC on 23 Sept, nothing followed). GitHub suppresses events
-# raised by runs that GITHUB_TOKEN itself started, and every run in the chain is started that
-# way by its predecessor. workflow_dispatch is exempt from that rule, so the hand-off calls
-# `gh workflow run health.yml` explicitly. workflow_run is kept only for the case where a
-# human starts a sync run by hand.
+# NOT a workflow_run trigger. That looked like the obvious way and it does not fire for the
+# chain: GitHub suppresses events raised by runs that GITHUB_TOKEN itself started, and every
+# chain run is started that way by its predecessor (sync run #105 completed 04:19 UTC on 23
+# Sept, nothing followed). It DOES fire for a run a human started by hand - which then
+# produced a second, duplicate health run beside the hand-off's dispatch (04:43 UTC). One
+# path only: the hand-off's explicit `gh workflow run health.yml`, which workflow_dispatch
+# exempts from that rule, plus the cron.
 #
 # Posting rule: only on FAILURE, except once a day when it also posts "all checks passing".
 # That daily proof-of-life uses the same atomic claim ref the once-a-day sync jobs use
@@ -24,9 +25,6 @@ name: Automation health
 # so however many runs happen the heartbeat goes out exactly once. Silence is never
 # evidence of health, because a dead watcher is silent too.
 on:
-  workflow_run:
-    workflows: ["Skool sync"]
-    types: [completed]
   schedule:
     - cron: "37 */3 * * *"      # backstop only - see above
   workflow_dispatch:
