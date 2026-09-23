@@ -192,16 +192,17 @@ def main():
     ok_g = fail_g = dup_g = 0
     for i, r in enumerate(need_ghl, 1):
         first, _, last = (r["name"] or "").partition(" ")
-        tags = ["skool-member", "skool-free-community"] + ([] if r["live"] else ["skool-historic"])
+        tags = ["skool-member", "skool-free-community", "entry-skool-join"] + ([] if r["live"] else ["skool-historic"])
+        # No `tags` on the upsert - it REPLACES the contact's tags (probed 23 Sept 2026).
         body = {"locationId": LOC, "firstName": first or r["name"] or "Unknown",
-                "lastName": last or "", "source": "Skool community (Close backfill)",
-                "tags": tags}
+                "lastName": last or "", "source": "Skool community (Close backfill)"}
         if r["email"]: body["email"] = r["email"]
         if r["phone"]: body["phone"] = r["phone"]
         s, d = ghl("POST", "/contacts/upsert", body)
         cid = (d.get("contact") or {}).get("id")
         if not cid:
             fail_g += 1; print(f"  ghl upsert FAILED {r['name']}: {s} {str(d)[:120]}"); continue
+        ghl("POST", f"/contacts/{cid}/tags", {"tags": tags})
         stage = GHL_NEW if r["live"] else GHL_HISTORIC
         s2, d2 = ghl("POST", "/opportunities/", {
             "pipelineId": GHL_PIPE, "locationId": LOC, "pipelineStageId": stage,

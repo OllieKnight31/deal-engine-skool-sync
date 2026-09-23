@@ -63,6 +63,61 @@ COUNTRY_TO_ISO = {
 }
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,24}$")
 
+# ── Origin tags ──────────────────────────────────────────────────────────────
+# Skool records how each member found the group (`attrSrcComp`). Until 23 Sept 2026 that
+# only ever reached GHL as text inside the contact's `source` string, so a Skool joiner
+# could not be filtered by channel alongside the funnel's `src-*` tags. The ids below are
+# the relay's channel ids (de-funnel-relay/api/_origin.js, CHANNEL) - one vocabulary
+# across all four funnels.
+SKOOL_SRC = {
+    "instagram.com": "ig-organic", "l.instagram.com": "ig-organic", "ig.me": "dm",
+    "manychat.com": "dm", "m.me": "dm", "messenger.com": "dm",
+    "facebook.com": "fb-organic", "l.facebook.com": "fb-organic", "lm.facebook.com": "fb-organic",
+    "youtube.com": "youtube", "m.youtube.com": "youtube", "youtu.be": "youtube",
+    "google.com": "google", "bing.com": "google", "tiktok.com": "tiktok",
+    "linkedin.com": "linkedin", "t.co": "x", "x.com": "x", "twitter.com": "x",
+    "direct": "direct", "affiliate": "referral", "invite": "referral",
+    "discovery_search_group_link": "skool", "discovery_group_link": "skool",
+    "discovery_browse_group_link": "skool", "user_profile_page": "skool", "internal_link": "skool",
+}
+# Our own funnel as the Skool referrer means "they came from /apply or the old Typeform" -
+# the GHL contact already carries the real source (or will), so Skool adds nothing here.
+OWN_HOSTS = {"dealenginehq.com", "dealenginegroup.com", "typeform.com", "linktr.ee"}
+_NOT_A_SOURCE = {"src-direct", "src-other"}
+
+
+def origin_tags(source, existing):
+    """Tags to ADD for a Skool join: always `entry-skool-join`, plus one `src-*` unless the
+    contact already carries a real one (the funnel's answer beats Skool's referrer)."""
+    existing = set(existing or [])
+    tags = ["entry-skool-join"]
+    if any(t.startswith("src-") and t not in _NOT_A_SOURCE for t in existing):
+        return tags
+    src = (source or "").strip().lower()
+    if not src or src in OWN_HOSTS:
+        return tags
+    ch = SKOOL_SRC.get(src) or ("skool" if src.startswith("discovery") else "other")
+    return tags + [f"src-{ch}"]
+
+
+def set_origin_tags(cid, tags, existing):
+    """Add `tags` (POST /contacts/{id}/tags is additive) and drop a stale src-direct /
+    src-other once a real src-* is present. `/contacts/upsert` with a `tags` list REPLACES
+    the contact's tags (probed 23 Sept 2026), which is why no upsert here sends any."""
+    tags = [t for t in tags if t]
+    if not cid or not tags:
+        return None
+    s, d = ghl("POST", f"/contacts/{cid}/tags", {"tags": tags})
+    if s not in (200, 201):
+        print(f"  tag write failed {cid}: {s} {str(d)[:100]}")
+        return s
+    if any(t.startswith("src-") for t in tags):
+        stale = [t for t in (existing or []) if t in _NOT_A_SOURCE and t not in tags]
+        if stale:
+            ghl("DELETE", f"/contacts/{cid}/tags", {"tags": stale})
+    return s
+
+
 def ghl(method, path, payload=None, base="https://services.leadconnectorhq.com"):
     r = urllib.request.Request(base + path,
         data=json.dumps(payload).encode() if payload is not None else None, method=method,
@@ -279,7 +334,7 @@ def main():
         if m["joined"]: cfs.append({"id":CF["joined"], "value":m["joined"][:10]})
         body = {"locationId":LOC, "firstName":m["first"] or "", "lastName":m["last"] or "",
                 "email":m["email"], "source": f"Skool community ({m['source']})" if m["source"] else "Skool community",
-                "tags":["skool-member","skool-free-community"], "customFields":cfs}
+                "customFields":cfs}
         if ph: body["phone"] = ph
         if not apply_changes:
             print(f"  DRY {name[:24]:26} {m['email'][:32]:34} phone={ph or '-':16} src={m['source']}")
@@ -289,6 +344,9 @@ def main():
         if s not in (200,201) or not c.get("id"):
             print(f"  FAIL contact {name}: {s} {str(d)[:120]}"); skipped += 1; continue
         created += 1
+        # Tags AFTER the upsert, additively - see set_origin_tags.
+        set_origin_tags(c["id"], ["skool-member", "skool-free-community"]
+                        + origin_tags(m["source"], c.get("tags")), c.get("tags"))
         if not has_card(c["id"]):
             so, od = ghl("POST", "/opportunities/", {"pipelineId":PIPE, "locationId":LOC,
                 "pipelineStageId":STAGE, "name":f"{name} — Skool free community",

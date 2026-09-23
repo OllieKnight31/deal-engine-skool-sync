@@ -177,7 +177,26 @@ def _fmt_source(src):
     return pretty.get(src, src)
 
 
-def _member_card(m, close_id=None, ghl_contact_id=None):
+# src-* tag -> label, mirroring CHANNEL in de-funnel-relay/api/_origin.js.
+SRC_LABEL = {
+    "meta-ads": "Meta Ads", "meta-unattrib": "Meta (unattributed)", "ig-bio": "Instagram Bio",
+    "ig-organic": "Instagram", "ig-app": "Instagram (untagged link)", "fb-app": "Facebook (untagged link)",
+    "fb-organic": "Facebook", "dm": "DM", "youtube-alex": "YouTube · Alex", "youtube-ana": "YouTube · Ana",
+    "youtube": "YouTube", "skool": "Skool", "podcast": "Podcast", "referral": "Referral",
+    "google": "Google", "tiktok": "TikTok", "email": "Email", "linkedin": "LinkedIn", "x": "X / Twitter",
+    "other": "Other", "direct": "Direct / Unknown",
+}
+
+
+def crm_source(ghl_tags):
+    """What the funnel already recorded for this person, from their src-* tag - or ''."""
+    for t in ghl_tags or []:
+        if t.startswith("src-") and t not in ("src-direct", "src-other"):
+            return SRC_LABEL.get(t[4:], t[4:])
+    return ""
+
+
+def _member_card(m, close_id=None, ghl_contact_id=None, ghl_tags=None):
     """(blocks, attachments, fallback) for one new member."""
     name = f"{m.get('first') or ''} {m.get('last') or ''}".strip() or "(no name)"
     suspect = suspect_reason(m)
@@ -203,12 +222,20 @@ def _member_card(m, close_id=None, ghl_contact_id=None):
         ("Email", f"<mailto:{email}|{esc(email)}>" if email else ""),
         ("Phone", f"<tel:{phone}|{phone}>" if phone
                   else (f"_{esc(phone_note[:120])}_  (not a dialable number)" if phone_note else "")),
-        ("Found us via", esc(_fmt_source(m.get("source")))),
+        ("Found us via", esc(_fmt_source(m.get("source")))
+                         + (f"  ·  CRM says *{esc(crm_source(ghl_tags))}*"
+                            if crm_source(ghl_tags) and (not m.get("source")
+                                                         or m.get("source") in ("dealenginehq.com", "dealenginegroup.com", "typeform.com"))
+                            else "")),
         ("Location", esc(m.get("location") or "")),
         ("Engagement", f"🔥 {pts} point{'s' if pts != 1 else ''} · level {m.get('level') or 1}" if pts else ""),
     ]
 
     notes = []
+    if "application-complete" in (ghl_tags or []):
+        notes.append("_Already applied through the funnel — their application answers are on the GHL contact._")
+    elif "call-booked" in (ghl_tags or []):
+        notes.append("_Already has a call booked — see the GHL contact._")
     if suspect:
         notes.append(f"⚠️  *Looks like junk* — {suspect}. Synced anyway so nothing is lost; "
                      f"tagged `skool-suspect` in GHL.")
@@ -233,11 +260,11 @@ def _member_card(m, close_id=None, ghl_contact_id=None):
     return blocks, attachments, f"{esc(name)} joined the BRRRR community"
 
 
-def post_member(m, close_id=None, ghl_contact_id=None):
+def post_member(m, close_id=None, ghl_contact_id=None, ghl_tags=None):
     """Post one new member. Returns True when Slack accepted it."""
     if not enabled:
         return False
-    blocks, attachments, fallback = _member_card(m, close_id, ghl_contact_id)
+    blocks, attachments, fallback = _member_card(m, close_id, ghl_contact_id, ghl_tags)
     r = _api("chat.postMessage", _identity({"channel": SLACK_CHANNEL, "text": fallback,
                                             "blocks": blocks, "attachments": attachments,
                                             "unfurl_links": False}))

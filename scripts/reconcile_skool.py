@@ -22,6 +22,7 @@ import json, re, sys, os, time, base64, datetime, urllib.request, urllib.error, 
 
 sys.path.insert(0, os.path.dirname(__file__))
 from skool_to_ghl import (pull_skool, SkoolUnavailable, ghl, clean_phone, iso_from_location, EMAIL_RE,
+                          origin_tags, set_origin_tags,
                           LOC, PIPE, STAGE, CF)
 import notify_slack
 
@@ -383,6 +384,7 @@ def main():
             save_created(created)
 
     ghl_contact = {}
+    ghl_tags = {}         # email -> the contact's tags after this run's write (for the card)
     claimed = {}          # contact id -> the email that legitimately owns it this run
     for m in miss_ghl:
         iso = iso_from_location(m["location"]); ph = clean_phone(m["phone_raw"], iso)
@@ -395,9 +397,12 @@ def main():
         if notify_slack.suspect_reason(m):
             # Still created - a heuristic must never be the reason a real lead vanishes.
             tags.append("skool-suspect")
+        # No `tags` on the upsert: it REPLACES the list (probed 23 Sept 2026) and was
+        # wiping `application-complete` and the funnel's `src-*` off anyone who applied
+        # before joining. They are added afterwards, additively, with the origin.
         body = {"locationId":LOC,"firstName":m["first"] or "","lastName":m["last"] or "",
                 "email":m["email"],"source":f"Skool community ({m['source']})" if m["source"] else "Skool community",
-                "tags":tags,"customFields":cfs}
+                "customFields":cfs}
         if ph: body["phone"] = ph
         s, d = ghl("POST", "/contacts/upsert", body)
         c = (d.get("contact") or {})
@@ -405,6 +410,10 @@ def main():
         if not c.get("id"):
             continue
         ghl_contact[m["email"]] = c["id"]
+        before = list(c.get("tags") or [])
+        added = tags + origin_tags(m["source"], before)
+        set_origin_tags(c["id"], added, before)
+        ghl_tags[m["email"]] = sorted(set(before) | set(added))
 
         # Second line of defence, for a collapse the phone index could not see (a first
         # collision, or one GHL deduped on something other than the number): the upsert
@@ -479,7 +488,8 @@ def main():
         for m in pending:
             if notify_slack.post_member(m, close_id=close_lead[m["email"]]["id"],
                                         ghl_contact_id=ghl_contact.get(m["email"])
-                                                       or ghl_contact_id(m["email"], collisions)):
+                                                       or ghl_contact_id(m["email"], collisions),
+                                        ghl_tags=ghl_tags.get(m["email"])):
                 if not notify_slack.stamp_close(close, close_lead[m["email"]]["id"]):
                     print(f"  WARNING: stamp failed for {m['email']} - it will re-announce")
                 print(f"  slack announced {m['email']}")
