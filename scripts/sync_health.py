@@ -113,6 +113,11 @@ MOVED_TO = {
     "skool-reconcile":    "GH Actions 'Skool sync' -> reconcile --pages 8, every 10th pass (~30 min)",
     "skool-ghl-deepscan": "GH Actions 'Skool sync' -> deepscan slot, 04:00 UTC claim",
     "skool-daily-count":  "GH Actions 'Skool sync' -> digest slot, 07:30 UTC claim",
+    # This check itself. It moved into GH Actions 'Automation health' (health.yml) on
+    # 23 Sept so it stops depending on this Mac being awake - which is exactly why its
+    # local cadence kept reading as missed windows. Without this entry the check flagged
+    # its own retirement as "that work has simply stopped".
+    "sync-health":        "GH Actions 'Automation health' (health.yml) -> chain-driven plus a 3-hourly cron backstop",
 }
 
 
