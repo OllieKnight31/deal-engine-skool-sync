@@ -62,6 +62,21 @@ Skool's side and nothing needs rotating, and a "recovered" note follows when Sko
 Before rotating anything, run the **Skool probe** workflow (Actions → *Skool probe* → Run): it
 shows which of the two shapes you actually have.
 
+## Health check + alarm — `Automation health` (`health.yml`)
+
+`scripts/sync_health.py` asks every pipe whether it is genuinely alive (CRM APIs, the chain's
+cadence, the four once-a-day claim refs, the Vercel relay's config flags and webhook signatures,
+the Skool cookie's expiry, Slack membership of both channels, and whether every recent member was
+announced). `scripts/health_alert.py` runs it and posts to **`#5-ops-alerts`** on failure.
+
+It runs **after every completed Skool sync run** (`workflow_run`, ~hourly) with a 3-hourly cron as
+backstop, so it does not depend on the studio Mac being awake — that is where it used to live, and
+it slept with the lid. Once a day the first run also posts "all checks passing" (claim ref
+`refs/daily-claim/health/<date>`), so a silent day is never mistaken for a healthy one.
+
+Off the Mac the launchd-only checks are reported as INFO, not silently dropped. Run it by hand
+with Actions → *Automation health* → Run (tick *always* to see the report in Slack).
+
 ## Local use
 
 ```bash

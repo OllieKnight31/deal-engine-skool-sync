@@ -1,0 +1,75 @@
+name: Automation health
+
+# WHY THIS RUNS HERE AND NOT ON THE MAC
+# The health check + Slack alarm ran on the studio Mac (launchd com.dealengine.sync-health,
+# every 3 h). On 22 Sept it missed two slots in a row because the lid was closed - a watcher
+# that sleeps with the laptop is not a watcher. Everything it watches already runs in the
+# cloud (this repo's chain, the Vercel relay), so the watcher lives here too.
+#
+# Trigger: after EVERY completed "Skool sync" run (workflow_run fires on the event, so it is
+# roughly hourly and does not depend on GitHub's best-effort cron), plus a 3-hourly cron as
+# a backstop for the case where the chain itself is down - which is precisely the case the
+# alarm exists for. The two collapse under one concurrency group.
+#
+# Posting rule: only on FAILURE, except once a day when it also posts "all checks passing".
+# That daily proof-of-life uses the same atomic claim ref the once-a-day sync jobs use
+# (refs/daily-claim/health/<date>): 201 to the first run of the day, 422 to every other,
+# so however many runs happen the heartbeat goes out exactly once. Silence is never
+# evidence of health, because a dead watcher is silent too.
+on:
+  workflow_run:
+    workflows: ["Skool sync"]
+    types: [completed]
+  schedule:
+    - cron: "37 */3 * * *"      # backstop only - see above
+  workflow_dispatch:
+    inputs:
+      always:
+        description: "post the report to Slack even when every check passes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: skool-health
+  cancel-in-progress: false
+
+permissions:
+  contents: write               # the daily heartbeat claim ref
+  actions: read                 # reading the sync chain's runs and logs
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Check every pipe, alarm #5-ops-alerts on failure
+        env:
+          SKOOL_COOKIE:    ${{ secrets.SKOOL_COOKIE }}
+          CLOSE_API_KEY:   ${{ secrets.CLOSE_API_KEY }}
+          GHL_PIT:         ${{ secrets.GHL_PIT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+          CALENDLY_PAT:    ${{ secrets.CALENDLY_PAT }}
+          GH_TOKEN:        ${{ github.token }}
+          FORCE_ALWAYS:    ${{ inputs.always && 'yes' || 'no' }}
+        run: |
+          set -u
+          ALWAYS=""
+          if [ "$FORCE_ALWAYS" = "yes" ]; then ALWAYS="--always"; fi
+          # Daily proof-of-life: whoever takes today's claim posts the report even when healthy.
+          DAY=$(date -u +%F)
+          if gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+               -f ref="refs/daily-claim/health/$DAY" -f sha="$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "first health run of $DAY - posting the heartbeat"
+            ALWAYS="--always"
+          fi
+          python scripts/health_alert.py $ALWAYS
