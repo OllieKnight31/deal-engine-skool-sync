@@ -68,6 +68,9 @@ CLOSE_LEAD_NEW = "stat_YhCiU5puvSNnmL9B6bxWJE8Bu4cNVevZEzQ706M2i3T"   # New Lead
 CLOSE_LEAD_COM = "stat_vwALWTscQ3ITPN8yn0hKhGzRX96PQUbSlETnQgPH4tO"   # Free Community Member
 CLOSE_CARD_DFY = "stat_ajTunHGgv62z0NcZoff4dyqr9gYnrGBUmn2GnIsWgum"   # New Application - DFY
 CLOSE_CARD_COM = "stat_og0gLAL2kopHcanYFH2Uqn8t5nEmdJluD5BFC03Q0eM"   # New Application - Community
+# Added to the Close board 21 Sept (relay: DFY_STAGE.NEW_MENTORSHIP). This sweep kept filing
+# Mentorship under Community until 26 Sept - John Gilliam's backfilled card landed there.
+CLOSE_CARD_MEN = "stat_niLZQ5uAvfxSR2ynaojrMtBMnHeIypRLQLMnLldFfkO"   # New Application - Mentorship
 
 # The two GHL intake stages. Scope only - they no longer decide the Close status.
 GHL_STAGE_DFY        = "236e05f2-ec7e-4f78-82c6-d8bcc61c6652"   # New Lead - DFY
@@ -77,7 +80,7 @@ INTAKE_STAGES = {GHL_STAGE_DFY, GHL_STAGE_MENTORSHIP}
 # rung -> (Close opportunity status id, Close lead status id)
 RUNG_MAP = {
     "done-for-you": (CLOSE_CARD_DFY, CLOSE_LEAD_DFY),
-    "mentorship":   (CLOSE_CARD_COM, CLOSE_LEAD_NEW),
+    "mentorship":   (CLOSE_CARD_MEN, CLOSE_LEAD_NEW),
     "community":    (CLOSE_CARD_COM, CLOSE_LEAD_COM),
 }
 # Used only when no rung can be read at all - the pre-rung behaviour, kept so a
