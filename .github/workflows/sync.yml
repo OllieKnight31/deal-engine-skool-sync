@@ -240,6 +240,13 @@ jobs:
             fi
             timeout 300 python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed or timed out on pass $PASS"; }
 
+            # Two-way Setter sync, GHL stage <-> Close lead status (26 Sept 2026). Close -> GHL
+            # is real time via the Close webhook on the relay; this is the GHL -> Close leg AND
+            # the backstop for a missed webhook (newest side wins). Every pass looks only at
+            # cards touched in the last 2 days; every 5th pass looks back 30.
+            SYNC_DAYS=2; [ $(( PASS % 5 )) -eq 1 ] && SYNC_DAYS=30
+            timeout 300 python scripts/ghl_setter_status_sync.py --apply --days "$SYNC_DAYS" || { FAILED=1; echo "::warning::setter status sync failed or timed out on pass $PASS"; }
+
             # Mirrors the GHL Setter Pipeline (DFY / Mentorship applications) into Close.
             # 15 minutes matches the launchd agent it replaces; it pages the whole Close
             # lead list, so it is deliberately not run on every pass.

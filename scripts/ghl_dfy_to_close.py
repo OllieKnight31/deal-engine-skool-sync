@@ -304,7 +304,7 @@ def route_dfy(o):
     # Never drop the application - fall back to the old stage mapping, but say so
     # loudly, because that fallback is exactly what mislabelled Mentorship applicants
     # as free community members.
-    card, lead = STAGE_FALLBACK[o["pipelineStageId"]]
+    card, lead = STAGE_FALLBACK.get(o["pipelineStageId"], STAGE_FALLBACK[GHL_STAGE_MENTORSHIP])
     return card, lead, "?/NO RUNG - stage fallback", True
 
 
@@ -334,9 +334,19 @@ def sweep(cfg, idx, a, totals):
     except ghl_http.GHLError as e:
         print(f"FATAL: could not read GHL opportunities.\n{e}", file=sys.stderr)
         sys.exit(2)
-    scoped = [o for o in opps
-              if (o.get("createdAt") or "")[:10] >= a.since
-              and o.get("pipelineStageId") in cfg["stages"]]
+    # Scope: still in an intake stage, OR - for the rung-aware board - anywhere on the board
+    # as long as the contact carries a rung tag (i.e. it is a real application). Before
+    # 26 Sept only intake stages were swept, so an application whose real-time Close write
+    # failed was repaired ONLY if nobody touched its GHL card for 30 minutes. Chris Lee
+    # (dialled within minutes) and John Gilliam (booked within 8) never got a DFY card.
+    # Bookings with no application (no rung tag) stay out: they belong on the Sales board.
+    def in_scope(o):
+        if (o.get("createdAt") or "")[:10] < a.since:
+            return False
+        if o.get("pipelineStageId") in cfg["stages"]:
+            return True
+        return cfg["rung_aware"] and resolve_rung(o)[0] is not None
+    scoped = [o for o in opps if in_scope(o)]
 
     # Hand-off window: the relay writes these to Close in real time, and Close's search
     # index has not caught up yet, so the sweep must not second-guess it.
