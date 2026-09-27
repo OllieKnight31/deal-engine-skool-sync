@@ -330,6 +330,14 @@ def sync_workflow_enabled():
     return f"'{w['name']}' active in {GH_REPO}"
 
 
+def run_job_count(run):
+    """Jobs the run actually started. 0 means it was cancelled while still queued."""
+    d = gh_api(f"repos/{GH_REPO}/actions/runs/{run['id']}/jobs?per_page=1")
+    if "total_count" not in d:
+        raise CannotCheck(f"no total_count in jobs of run {run.get('run_number')}")
+    return d["total_count"]
+
+
 def sync_last_run():
     """The newest run that has actually FINISHED.
 
@@ -342,6 +350,15 @@ def sync_last_run():
     done = [r for r in runs if r.get("status") == "completed"]
     flight = [r for r in runs if r.get("status") != "completed"]
     tail = f", #{flight[0]['run_number']} in flight" if flight else ""
+    # A */15 cron run that queues behind the chain is cancelled by concurrency when the
+    # hand-off dispatches the successor. It never got a job, so it is not evidence either
+    # way: skip it. A run cancelled AFTER a job started (a hung pass killed) still counts.
+    superseded = 0
+    while done and done[0].get("conclusion") == "cancelled" and run_job_count(done[0]) == 0:
+        done.pop(0)
+        superseded += 1
+    if superseded:
+        tail += f", {superseded} queued run(s) superseded"
     if not done:
         raise RuntimeError(f"not one completed run in the last {len(runs)}{tail}")
     r = done[0]
