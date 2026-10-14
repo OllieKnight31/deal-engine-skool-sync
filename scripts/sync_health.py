@@ -1176,6 +1176,10 @@ print("\n Skool -> Slack")
 check("malformed Skool emails", malformed_emails)
 check("Slack auth + channel", slack_can_post)
 check("every lead announced", every_lead_announced)
+# Every person a source saw this week is in Close (GHL, Calendly, Stripe). Added 14 Oct 2026:
+# each sync only proves its own writes, so nothing was asking the question from this end.
+import close_coverage
+check("every lead is in Close", close_coverage.check)
 if ON_MAC:
     print("\n Still local to this Mac")
     check("cookie auto-refresh", cookie_refresher_scheduled)

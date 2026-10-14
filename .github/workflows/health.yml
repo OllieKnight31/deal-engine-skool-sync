@@ -64,6 +64,8 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
           CALENDLY_PAT:    ${{ secrets.CALENDLY_PAT }}
+          GHL_READ_PIT:    ${{ secrets.GHL_READ_PIT }}
+          STRIPE_KEY:      ${{ secrets.STRIPE_KEY }}
           GH_TOKEN:        ${{ github.token }}
           FORCE_ALWAYS:    ${{ inputs.always && 'yes' || 'no' }}
         run: |
