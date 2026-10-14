@@ -26,6 +26,7 @@ import os, re, sys, json, time, base64, datetime, urllib.parse, urllib.request, 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ghl_http
+from test_records import is_test_record
 
 WINDOW_DAYS = 7
 # The relay writes in seconds and the CI sweeps every ~15 min; anything younger than this
@@ -35,8 +36,7 @@ LOC = "2RrjNuz0M4MTFlxpW37k"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
 # Test traffic and the team's own addresses are never leads.
-NOT_A_LEAD = re.compile(r"(@example\.com$|@dealenginegroup\.com$|@dealenginehq\.com$|"
-                        r"^charlieknight\d*@|^charlietest@|^ollieknight31|^zz|test)", re.I)
+NOT_A_LEAD = re.compile(r"(@dealenginegroup\.com$|@dealenginehq\.com$|^ollieknight31)", re.I)
 
 
 def _now():
@@ -191,7 +191,7 @@ def misses(window_days=WINDOW_DAYS):
         key = email or _phone(phone)
         if not key or key in seen or _ts(when) > cutoff:
             continue
-        if NOT_A_LEAD.search(email) or NOT_A_LEAD.search(name or ""):
+        if NOT_A_LEAD.search(email) or is_test_record(name, email):
             continue
         seen.add(key)
         if email in known or _phone(phone) in known:

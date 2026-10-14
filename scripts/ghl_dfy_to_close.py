@@ -49,6 +49,7 @@ Usage:
 import json, os, sys, base64, argparse, datetime, urllib.request, urllib.error, urllib.parse, re, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ghl_http
+from test_records import is_test_record
 
 # No inline fallback: this repo is PUBLIC, and a missing token must fail loudly
 # rather than quietly authenticating as somebody else.
@@ -381,6 +382,9 @@ def sweep(cfg, idx, a, totals):
         email = (c.get("email") or "").strip().lower()
         name = (c.get("name") or "").strip() or (o.get("name") or "").strip()
         phone = (c.get("phone") or "").strip()
+        if is_test_record(name, email):
+            print(f"  TEST  {name[:28]:28} {email[:34]:34} test record - not mirrored")
+            continue
 
         opp_status, want_lead_status, route_label, rung_missing = cfg["route"](o)
         rung = route_label.split("/")[0] if cfg["rung_aware"] and not rung_missing else None

@@ -50,6 +50,7 @@ import argparse, datetime, os, re, sys, time, urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ghl_http
+from test_records import is_test_record
 import ghl_dfy_to_close as base   # shared Close/GHL plumbing, dedupe-safe lead confirmation
 
 SETTER_PIPE = "cDPVmjlo65NVVn1g6ePU"
@@ -155,6 +156,8 @@ def main():
         tag = f"{name:26} {email[:32]:32}"
         if not base.EMAIL_RE.match(email):
             print(f"  SKIP   {tag} no usable e-mail"); t["skipped"] += 1; continue
+        if is_test_record(c.get("name") or o.get("name"), email):
+            print(f"  TEST   {tag} test record - not synced"); t["skipped"] += 1; continue
         if g_at and g_at > grace:
             print(f"  WAIT   {tag} GHL moved {int((now - g_at).total_seconds())}s ago - inside grace"); t["skipped"] += 1; continue
 
