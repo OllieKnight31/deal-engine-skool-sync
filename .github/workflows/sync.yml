@@ -113,6 +113,8 @@ jobs:
           GHL_PIT:         ${{ secrets.GHL_PIT }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+          EVENT_INGEST_SECRET:    ${{ secrets.EVENT_INGEST_SECRET }}
+          SKOOL_PAYMENTS_CHANNEL: ${{ secrets.SKOOL_PAYMENTS_CHANNEL }}
           LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
           INTERVAL:        ${{ inputs.interval || '120' }}
           GH_TOKEN:        ${{ github.token }}
@@ -239,6 +241,16 @@ jobs:
               echo "::warning::reconcile (pages $PAGES) failed or timed out on pass $PASS (exit $RC)"
             fi
             timeout 300 python scripts/close_phone_normalise.py --apply          || { FAILED=1; echo "::warning::phone normalise failed or timed out on pass $PASS"; }
+
+            # Skool paid tiers (14 Oct 2026). Skool bills VIP/Premium through its own Stripe, so
+            # this is the only way that money reaches the Command Centre and #4-skool-payments.
+            # One filtered members page per pass; the dashboard's SKOOL PAYMENTS ledger holds
+            # the state, so re-sending the same list is a no-op. Exit 75 = Skool's WAF, a skip.
+            RC=0; timeout 240 python scripts/skool_payments.py || RC=$?
+            if [ "$RC" != "0" ] && [ "$RC" != "75" ]; then
+              FAILED=1
+              echo "::warning::skool payments check failed or timed out on pass $PASS (exit $RC)"
+            fi
 
             # Two-way Setter sync, GHL stage <-> Close lead status (26 Sept 2026). Close -> GHL
             # is real time via the Close webhook on the relay; this is the GHL -> Close leg AND

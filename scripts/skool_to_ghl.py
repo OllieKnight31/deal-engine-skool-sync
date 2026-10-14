@@ -180,14 +180,15 @@ _BACKOFF = [int(x) for x in os.environ.get("SKOOL_RETRY_BACKOFF", "5,10,20").spl
 TRANSIENT_STATUSES = {403, 408, 425, 429, 500, 502, 503, 504}
 
 
-def _fetch_members_page(cookie, n, ua):
-    """One members page as HTML.
+def _fetch_members_page(cookie, n, ua, query=""):
+    """One members page as HTML. `query` adds Skool's own filters, e.g.
+    "&annual=true&monthly=true&oneTime=true" (paid tiers) or "&t=churned" (a tab).
 
     Raises SkoolUnavailable for a transient upstream failure (see the class) and SystemExit
     when the session itself is rejected - the one case where SKOOL_COOKIE needs rotating.
     """
     req = urllib.request.Request(
-        f"https://www.skool.com/{COMMUNITY}/-/members?p={n}",
+        f"https://www.skool.com/{COMMUNITY}/-/members?p={n}{query}",
         headers={"Cookie": cookie, "User-Agent": ua,
                  "Accept": "text/html,application/xhtml+xml"})
     last = None
@@ -219,18 +220,12 @@ def _fetch_members_page(cookie, n, ua):
     raise last
 
 
-def pull_skool(pages=0):
-    """Read the Skool members page over plain HTTP - no browser.
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
 
-    `pages` is a CAP, not a target: the walk always stops at Skool's own `totalPages`.
-    Pass 0 (the default) for "however many there are" - the community grows ~43/day, so any
-    hardcoded number silently stops covering the list. Check LAST_SCAN_COMPLETE afterwards.
 
-    The members page is server-rendered, so a cookie-authenticated GET returns the
-    whole record set in __NEXT_DATA__. Only auth_token + client_id are needed (the
-    AWS load-balancer cookies are not), and auth_token is valid for ~364 days, which
-    is what lets this run unattended in CI instead of needing a logged-in browser.
-    """
+def skool_cookie():
+    """The Skool session cookie: env first, then the on-disk copy. Exits if there is none."""
     cookie = os.environ.get("SKOOL_COOKIE")
     if not cookie:
         tok, cid = os.environ.get("SKOOL_AUTH_TOKEN"), os.environ.get("SKOOL_CLIENT_ID")
@@ -247,8 +242,23 @@ def pull_skool(pages=0):
     if not cookie:
         raise SystemExit("No Skool cookie. Set SKOOL_COOKIE / SKOOL_AUTH_TOKEN, or run "
                          "automations/scripts/skool_cookie_from_disk.py")
-    UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+    return cookie
+
+
+def pull_skool(pages=0):
+    """Read the Skool members page over plain HTTP - no browser.
+
+    `pages` is a CAP, not a target: the walk always stops at Skool's own `totalPages`.
+    Pass 0 (the default) for "however many there are" - the community grows ~43/day, so any
+    hardcoded number silently stops covering the list. Check LAST_SCAN_COMPLETE afterwards.
+
+    The members page is server-rendered, so a cookie-authenticated GET returns the
+    whole record set in __NEXT_DATA__. Only auth_token + client_id are needed (the
+    AWS load-balancer cookies are not), and auth_token is valid for ~364 days, which
+    is what lets this run unattended in CI instead of needing a logged-in browser.
+    """
+    cookie = skool_cookie()
+    UA = BROWSER_UA
     global LAST_SCAN_COMPLETE
     LAST_SCAN_COMPLETE = False
     # 0/None means "walk to the end"; the loop still terminates on totalPages.
