@@ -199,9 +199,30 @@ def _date(iso):
         return ""
 
 
+_team_ids = None
+
+
+def team_slack_ids():
+    """First name -> Slack ID from the EOD Admin Portal's team list, over the static map, so a
+    closer added there gets mentioned straight away. Down or unset: the static map carries on."""
+    global _team_ids
+    if _team_ids is None:
+        _team_ids = dict(SLACK_IDS)
+        try:
+            req = urllib.request.Request(f"{DASHBOARD_API}?action=team_directory",
+                                         headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                for p in json.load(r).get("team", []):
+                    if p.get("slack") and "closer" in (p.get("roles") or []):
+                        _team_ids[p["name"].lower().split(" ")[0]] = p["slack"]
+        except Exception as e:
+            print(f"team directory unavailable, using the static closer map: {e}")
+    return _team_ids
+
+
 def closer_slack_id(closer):
     key = (closer or "").strip().lower().split(" ")[0].split("@")[0]
-    return SLACK_IDS.get(key, FALLBACK_CLOSER)
+    return team_slack_ids().get(key, FALLBACK_CLOSER)
 
 
 def card(e):
