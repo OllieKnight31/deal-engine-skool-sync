@@ -67,12 +67,14 @@ CLASSES = {
     "qualified": (["Qualified – Not Booked"], ["Qualified – Not Booked"]),
     "callback":  (["Callback Booked"], ["Callback Booked"]),
     "call_set":  (["Call Set"], ["Call Booked", "Call Confirmed", "Closer Follow Up (Charlie)",
-                                 "Closer Follow Up (Mike)", "Signed Up", "Signed Up - Balance Owed"]),
+                                 "Closer Follow Up (Mike)", "Closer Follow Up (Daniel)", "Signed Up",
+                                 "Signed Up - Balance Owed"]),
     "nurture":   (["Long Term – Nurture"], ["Long Term – Nurture"]),
     "lost":      (["Lead Lost / Not Interested"], ["Lead Lost / Not Interested", "DQ"]),
 }
 # Close statuses a GHL move may never overwrite - a closer set these after the setter's job ended.
 PROTECTED_CLOSE = {"Call Confirmed", "Closer Follow Up (Charlie)", "Closer Follow Up (Mike)",
+                   "Closer Follow Up (Daniel)",
                    "Signed Up", "Signed Up - Balance Owed"}
 # Moves refused even when the other side is newer (same table as BLOCKED in _stagesync.js):
 #   call_set -> pre-booking: a booking is a fact; a later "Spoke" dropdown is a setter logging

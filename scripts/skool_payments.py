@@ -63,7 +63,8 @@ FUNNEL_SKOOL_STATUS = {"label": "Skool billing", "color": "#8A8F98", "chip": "â¬
 
 # Closer name/email -> Slack user, for "file your outcome" mentions. From the team roles
 # memory (21 Sept 2026). An unknown closer falls back to Charlie, who runs the closers.
-SLACK_IDS = {"charlie": "U0C0TPJG4TT", "mike": "U0C2CF2LT3J", "michael": "U0C2CF2LT3J", "mick": "U0C2CF2LT3J"}
+SLACK_IDS = {"charlie": "U0C0TPJG4TT", "mike": "U0C2CF2LT3J", "michael": "U0C2CF2LT3J", "mick": "U0C2CF2LT3J",
+             "daniel": "U0CCGGB2204"}
 FALLBACK_CLOSER = "U0C0TPJG4TT"
 
 GHL_LOCATION = LOC
