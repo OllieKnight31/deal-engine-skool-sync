@@ -65,7 +65,9 @@ WF_SYNC       = 361221459              # "Skool sync" - the self-dispatching cha
 WF_MAINT      = 361918789              # "Skool maintenance" - standby only, see maintenance_workflow()
 WF_KEEPALIVE  = 362477287              # "Keep the schedule alive"
 CHAIN_GAP_MIN = 75                     # handoff is every ~50-55 min; beyond this it is broken
-RELAY_HEALTH  = "https://de-funnel-relay.vercel.app/api/health"
+# The Vercel relay and the EOD project were disabled (402) and replaced on 8 Nov 2026:
+# relay -> GHL workflows (inbound webhooks), EOD backend -> an Apps Script web app.
+# URLs come from secrets because this repo is public (see _relay_targets()).
 MALFORMED_PAGES = 6                    # Skool pages read for the live member checks
 
 # ---- the once-a-day slots, and how we know they ran --------------------------
@@ -634,42 +636,44 @@ def keepalive_workflow():
     return f"active, repo last commit {quiet_d:.1f} d ago (60 d = auto-disable); {last}"
 
 
-# ---- Vercel relay ------------------------------------------------------------
+# ---- Apps Script EOD backend (replaced deal-engine-eod on Vercel, 8 Nov 2026) ------
 
-def relay_health():
-    """Both intake routes are dual-written to Close in real time by de-funnel-relay.
+def _relay_targets():
+    """{calendly, close-hook, stripe} GHL inbound-webhook URLs. CI: the GHL_RELAY_HOOKS secret
+    (JSON). Mac: ghl-migration/relay-gh/state.json, the file the migration writes."""
+    raw = os.environ.get("GHL_RELAY_HOOKS", "").strip()
+    if raw:
+        return json.loads(raw)
+    state = os.path.join(HERE, "..", "..", "..", "ghl-migration", "relay-gh", "state.json")
+    if os.path.exists(state):
+        return {k: v["hook"] for k, v in json.load(open(state)).items() if isinstance(v, dict) and v.get("hook")}
+    raise CannotCheck("no GHL_RELAY_HOOKS secret and no relay-gh/state.json")
 
-    If closeApiKey is false the relay still returns 200, still accepts the lead and
-    still posts to Slack - it just never reaches Close. That is a dead pipe wearing the
-    costume of a healthy one, which is the exact failure class this file exists to
-    catch, so every config boolean must be true, not merely present.
-    """
-    r = subprocess.run(["curl", "-s", "--max-time", "25", "-w", "\n%{http_code}", RELAY_HEALTH],
-                       capture_output=True, text=True, timeout=45)
+
+def apps_script_diag():
+    """The EOD backend answers `action=diag` with one raw Sheets read. Apps Script always
+    replies 200 (after one redirect) and puts the real status in a `http` field, so the
+    body is what is judged, never the status line."""
+    url, key = os.environ.get("EOD_API", "").strip(), os.environ.get("EOD_VIEW_KEY", "").strip()
+    if not url or not key:
+        raise CannotCheck("EOD_API / EOD_VIEW_KEY not set")
+    r = subprocess.run(["curl", "-s", "-L", "--max-time", "40", "-w", "\n%{http_code}",
+                        f"{url}?action=diag&key={urllib.parse.quote(key)}"],
+                       capture_output=True, text=True, timeout=60)
     parts = (r.stdout or "").rsplit("\n", 1)
     if r.returncode != 0 or len(parts) != 2:
-        raise CannotCheck(f"relay unreachable: {((r.stderr or r.stdout) or 'no output').strip()[:160]}")
-    body, code = parts[0], parts[1].strip()
-    if code != "200":
-        raise RuntimeError(f"HTTP {code} from /api/health: {body[:160]}")
+        raise CannotCheck(f"Apps Script unreachable: {((r.stderr or r.stdout) or 'no output').strip()[:160]}")
+    body, code = parts
     try:
         d = json.loads(body)
     except ValueError:
-        raise CannotCheck(f"non-JSON from /api/health: {body[:160]}")
-    if d.get("ok") is not True:
-        raise RuntimeError(f"relay reports ok={d.get('ok')!r}: {body[:200]}")
-    cfg = d.get("config")
-    if not isinstance(cfg, dict) or not cfg:
-        raise CannotCheck(f"no config map in the health payload: {body[:160]}")
-    if "closeApiKey" not in cfg:
-        raise RuntimeError("health payload no longer reports closeApiKey - the real-time "
-                           "Close mirror cannot be proved configured")
-    off = sorted(k for k, v in cfg.items() if v is not True)
-    if off:
-        lead = "Close mirroring is OFF - " if "closeApiKey" in off else ""
-        raise RuntimeError(f"{lead}config false: {', '.join(off)} (leads would be accepted "
-                           f"and silently dropped)")
-    return f"200 ok, {len(cfg)}/{len(cfg)} config flags true: {', '.join(sorted(cfg))}"
+        raise RuntimeError(f"HTTP {code.strip()}, non-JSON from diag: {body[:160]}")
+    if d.get("http") or d.get("status") != "ok":
+        raise RuntimeError(f"diag says http={d.get('http')} status={d.get('status')}: {body[:200]}")
+    if d.get("sheets_http") != 200:
+        raise RuntimeError(f"diag cannot read the EOD sheet (Sheets HTTP {d.get('sheets_http')}): "
+                           f"{str(d.get('sheets_body') or d.get('sheets_error'))[:160]}")
+    return f"ok, Sheets read 200 ({d.get('intl_london', '')[:40]})"
 
 
 # ---- CRM APIs ----------------------------------------------------------------
@@ -1022,21 +1026,14 @@ def report_retired():
         fails.append("retired job inventory")
 
 
-RELAY = os.environ.get("RELAY_BASE", "https://de-funnel-relay.vercel.app")
-
-
-def _relay_status(path, method="POST", body="{}"):
-    args = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", method,
-            "-H", "content-type: application/json", RELAY + path]
-    if method == "POST":
-        args[-1:] = ["-d", body, RELAY + path]
-    return subprocess.run(args, capture_output=True, text=True).stdout.strip()
-
-
 def close_webhook_live():
-    """The Close -> Slack no-show pipe. Before 21 Sept the only subscription pointed at
+    """The Close -> no-show / stage pipe. Before 21 Sept the only subscription pointed at
     hooks.zapier.com and had been PAUSED with permission_revoked since 15 Sept, which is
-    indistinguishable from 'nobody no-showed' unless something checks."""
+    indistinguishable from 'nobody no-showed' unless something checks. Since 8 Nov 2026 it
+    must point at the GHL `close-hook` inbound webhook (the Vercel relay is gone)."""
+    want = _relay_targets().get("close-hook")
+    if not want:
+        raise CannotCheck("no close-hook URL in the GHL relay targets")
     auth = "Basic " + base64.b64encode((CLOSE_KEY + ":").encode()).decode()
     out = subprocess.run(["curl", "-s", "-H", f"Authorization: {auth}",
                           "https://api.close.com/api/v1/webhook/"],
@@ -1045,57 +1042,63 @@ def close_webhook_live():
         body = json.loads(out)
     except Exception:
         raise CannotCheck(f"Close /webhook/ returned unparseable output: {out[:120]}")
-    # A failed read is NOT an absence. `.get("data", [])` on {"error": "Unauthorized"} is []
-    # and used to be reported as "Close has NO webhook subscription - no-show alerts are
-    # dead", which is a page-someone-at-3am alarm raised by a transient 401. Observed for
-    # real on 23 Sept: both CRM calls 401'd for one run and were fine seconds later.
+    # A failed read is NOT an absence (a transient 401 once raised a false "no webhook").
     if not isinstance(body, dict) or "data" not in body:
         raise CannotCheck(f"could not read Close webhooks: {str(body)[:120]}")
     subs = body["data"]
     if not subs:
         raise RuntimeError("Close has NO webhook subscription - no-show alerts are dead")
-    ours = [w for w in subs if "de-funnel-relay" in (w.get("url") or "")]
+    ours = [w for w in subs if (w.get("url") or "") == want]
     if not ours:
-        raise RuntimeError(f"{len(subs)} subscription(s) but none point at the relay: "
-                           + ", ".join((w.get('url') or '')[:40] for w in subs))
+        raise RuntimeError(f"{len(subs)} subscription(s) but none point at the GHL close-hook: "
+                           + ", ".join((w.get('url') or '')[:60] for w in subs))
     bad = [w for w in ours if w.get("status") != "active"]
     if bad:
-        raise RuntimeError(f"relay subscription is {bad[0].get('status')} "
+        raise RuntimeError(f"GHL close-hook subscription is {bad[0].get('status')} "
                            f"({bad[0].get('pause_reason')})")
-    zap = [w for w in subs if "zapier" in (w.get('url') or '')]
-    extra = f"; {len(zap)} stale Zapier subscription(s) still present" if zap else ""
-    delivered = sum((w.get("counters") or {}).get("first_success", 0) for w in ours)
-    return f"active, {int(delivered)} delivered{extra}"
+    stale = [w for w in subs if w not in ours]
+    extra = f"; {len(stale)} other subscription(s): " + ", ".join((w.get('url') or '')[:40] for w in stale) if stale else ""
+    return f"active -> GHL close-hook{extra}"
 
 
-def stripe_webhook_armed():
-    """401 on an unsigned POST is the proof STRIPE_WEBHOOK_SECRET is actually bound. A 200
-    means the endpoint is live but accepting forged payments from anyone who knows the URL."""
-    code = _relay_status("/api/stripe")
-    if code == "401":
-        return "signature enforced (unsigned POST -> 401)"
-    if code == "200":
-        raise RuntimeError("endpoint is UNAUTHENTICATED - STRIPE_WEBHOOK_SECRET not bound")
-    raise RuntimeError(f"unexpected status {code}")
+def stripe_webhook_target():
+    """Stripe must deliver to the GHL `stripe` inbound webhook (enabled). The GHL code step
+    re-fetches every event by id from the Stripe API, so an unsigned forgery is ignored."""
+    want = _relay_targets().get("stripe")
+    key = os.environ.get("STRIPE_KEY", "").strip()
+    if not key:
+        pat = os.path.join(CLIENT_SECRETS, "stripe_restricted_key")
+        key = open(pat).read().strip() if os.path.exists(pat) else ""
+    if not key or not want:
+        raise CannotCheck("no STRIPE_KEY or no stripe hook URL")
+    out = subprocess.run(["curl", "-s", "-u", key + ":", "https://api.stripe.com/v1/webhook_endpoints?limit=50"],
+                         capture_output=True, text=True).stdout
+    try:
+        d = json.loads(out)
+    except ValueError:
+        raise CannotCheck(f"Stripe returned unparseable output: {out[:120]}")
+    if "data" not in d:
+        raise CannotCheck(f"could not read Stripe webhooks: {str(d.get('error', d))[:160]}")
+    ours = [w for w in d["data"] if w.get("url") == want]
+    if not ours:
+        raise RuntimeError("no Stripe webhook endpoint points at the GHL stripe hook: "
+                           + ", ".join((w.get('url') or '')[:60] for w in d["data"]))
+    if ours[0].get("status") != "enabled":
+        raise RuntimeError(f"Stripe endpoint {ours[0]['id']} is {ours[0].get('status')}")
+    return f"{ours[0]['id']} enabled -> GHL stripe hook"
 
 
-def close_hook_armed():
-    code = _relay_status("/api/close-hook")
-    if code == "401":
-        return "signature enforced (unsigned POST -> 401)"
-    if code == "200":
-        raise RuntimeError("endpoint is UNAUTHENTICATED - CLOSE_WEBHOOK_SECRET not bound")
-    raise RuntimeError(f"unexpected status {code}")
-
-
-def calendly_webhook_state():
-    """Reported, not silently skipped. The page hook covers in-browser bookings; what is
-    missing is the server-side net for e-mail-link bookings, reschedules and cancellations."""
+def calendly_webhook_target():
+    """The Calendly org subscription must point at the GHL `calendly` inbound webhook and be
+    active (8 Nov 2026: the old de-funnel-relay /api/calendly subscription was deleted)."""
+    want = _relay_targets().get("calendly")
+    if not want:
+        raise CannotCheck("no calendly hook URL in the GHL relay targets")
     token = os.environ.get("CALENDLY_PAT", "").strip()
     if not token:
         pat = os.path.join(CLIENT_SECRETS, "calendly_pat")
         if not os.path.exists(pat):
-            raise RuntimeError("no CALENDLY_PAT secret and no PAT on disk - /api/calendly can never fire")
+            raise CannotCheck("no CALENDLY_PAT secret and no PAT on disk")
         token = open(pat).read().strip()
     ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
@@ -1105,32 +1108,24 @@ def calendly_webhook_state():
     try:
         org = json.loads(me)["resource"]["current_organization"]
     except Exception:
-        raise RuntimeError(f"PAT rejected: {me[:120]}")
+        raise CannotCheck(f"PAT rejected: {me[:120]}")
     q = urllib.parse.quote(org)
-    subs = subprocess.run(["curl", "-s", "-H", f"Authorization: Bearer {token}",
-                           "-H", f"User-Agent: {ua}",
-                           f"https://api.calendly.com/webhook_subscriptions?organization={q}"
-                           f"&scope=organization&count=20"],
-                          capture_output=True, text=True).stdout
-    n = len(json.loads(subs).get("collection", [])) if subs.strip().startswith("{") else 0
-    if n:
-        return f"{n} subscription(s) on org {org.rsplit('/', 1)[-1][:8]}"
-    raise RuntimeError("PAT valid but 0 subscriptions - Calendly free plan blocks the "
-                       "webhook API (403 'upgrade to Standard'), and this org has 0 events. "
-                       "Booked calls rely on the page hook only.")
-
-
-def stripe_enrichment_state():
-    """Reads the relay's `optional.stripeSecretKey` flag - outside `config` on purpose, so
-    relay_health() does not fail on it. See de-funnel-relay/STRIPE-SETUP.md."""
-    out = subprocess.run(["curl", "-s", "--max-time", "25", RELAY_HEALTH],
-                         capture_output=True, text=True, timeout=45).stdout
-    d = json.loads(out)
-    opt = d.get("optional") or {}
-    if opt.get("stripeSecretKey") is True:
-        return "set - invoice/PI dedupe exact, cards carry product + card + receipt"
-    return ("NOT SET - payments still post; invoice failures thread under the PI card; "
-            "create a restricted read-only key in a normal browser (STRIPE-SETUP.md)")
+    out = subprocess.run(["curl", "-s", "-H", f"Authorization: Bearer {token}",
+                          "-H", f"User-Agent: {ua}",
+                          f"https://api.calendly.com/webhook_subscriptions?organization={q}"
+                          f"&scope=organization&count=50"],
+                         capture_output=True, text=True).stdout
+    try:
+        subs = json.loads(out)["collection"]
+    except Exception:
+        raise CannotCheck(f"could not list Calendly subscriptions: {out[:160]}")
+    ours = [x for x in subs if x.get("callback_url") == want]
+    if not ours:
+        raise RuntimeError(f"{len(subs)} subscription(s) on org {org.rsplit('/', 1)[-1][:8]}, none to the "
+                           "GHL calendly hook: " + ", ".join((x.get('callback_url') or '')[:60] for x in subs))
+    if ours[0].get("state") != "active":
+        raise RuntimeError(f"GHL calendly subscription is {ours[0].get('state')}")
+    return f"active -> GHL calendly hook ({', '.join(ours[0].get('events') or [])})"
 
 
 print("DealEngine automation health\n")
@@ -1148,27 +1143,11 @@ check("60-page deep scan  04:00", lambda: slot_check("deepscan"))
 check("pipeline hygiene   06:20", lambda: slot_check("hygiene"))
 check("daily join count   07:30", lambda: slot_check("digest"))
 check("weekly digest  Mon 08:00", lambda: slot_check("weekly"))
-print("\n Real-time intake (Vercel relay)")
-check("relay /api/health", relay_health)
-check("Close no-show webhook", close_webhook_live)
-check("/api/close-hook signature", close_hook_armed)
-check("/api/stripe signature", stripe_webhook_armed)
-# INFO, not a check. Without STRIPE_SECRET_KEY the relay still posts every payment and
-# failure; cards are thinner and an invoice failure may double up as a thread reply.
-# Creating the key is a hands-on-keyboard step (Stripe's email-link verification fails
-# under automation), so failing every run here would only train people to mute the alarm.
-try:
-    info("Stripe read-only key", stripe_enrichment_state())
-except Exception as _e:
-    info("Stripe read-only key", f"UNKNOWN - {str(_e)[:200]}")
-# INFO, not a check. It is a genuine gap, but a KNOWN one that is blocked on a Calendly
-# plan upgrade and on finding the org that owns the live booking link. Failing every run
-# would make the 3-hourly Slack alarm cry wolf until someone muted it, and then the real
-# failures would be muted too. Revisit the moment a paid-org PAT exists.
-try:
-    info("Calendly webhook", calendly_webhook_state())
-except Exception as _e:
-    info("Calendly webhook", f"NOT WIRED - {str(_e)[:200]}")
+print("\n Real-time intake (GHL workflows + Apps Script, since 8 Nov 2026)")
+check("Apps Script EOD diag", apps_script_diag)
+check("Calendly -> GHL calendly hook", calendly_webhook_target)
+check("Close -> GHL close-hook", close_webhook_live)
+check("Stripe -> GHL stripe hook", stripe_webhook_target)
 print("\n Skool credential (the one this process syncs with)")
 check("Skool session cookie", skool_cookie_live)
 check("phonenumbers dependency", phonenumbers_present)

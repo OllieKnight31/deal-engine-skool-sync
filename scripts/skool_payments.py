@@ -50,7 +50,10 @@ from skool_to_ghl import (_fetch_members_page, skool_cookie, SkoolUnavailable, B
                           COMMUNITY, LOC)
 import notify_slack as N
 
-DASHBOARD_API = os.environ.get("DASHBOARD_API", "https://deal-engine-eod.vercel.app/api")
+# The EOD backend moved from Vercel (disabled, 402) to an Apps Script web app on 8 Nov 2026.
+# Apps Script cannot read headers, so the secret rides in ?key=; it always answers 200 after
+# one redirect and carries the real status in a `http` field of the body.
+DASHBOARD_API = os.environ.get("DASHBOARD_API", "") or os.environ.get("EOD_API", "")
 INGEST_SECRET = os.environ.get("EVENT_INGEST_SECRET", "")
 # #4-skool-payments. By ID, never by name (see #5-community-joins, renamed the day it was made).
 CHANNEL = os.environ.get("SKOOL_PAYMENTS_CHANNEL", "")
@@ -165,15 +168,23 @@ def churned_ids(cookie, wanted):
 def post_snapshot(body):
     if not INGEST_SECRET:
         raise SystemExit("EVENT_INGEST_SECRET is not set - the dashboard would refuse the snapshot.")
-    req = urllib.request.Request(DASHBOARD_API + "?source=skool_payments", data=json.dumps(body).encode(),
-                                 method="POST", headers={"Authorization": "Bearer " + INGEST_SECRET,
-                                                         "Content-Type": "application/json",
-                                                         "User-Agent": "deal-engine-skool-sync"})
+    if not DASHBOARD_API:
+        raise SystemExit("EOD_API is not set - nowhere to send the snapshot.")
+    url = DASHBOARD_API + "?source=skool_payments&key=" + urllib.parse.quote(INGEST_SECRET)
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": "deal-engine-skool-sync"})
     last = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=90) as r:
-                return json.load(r)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                out = json.load(r)
+            code = out.get("http") if isinstance(out, dict) else None
+            if not code:
+                return out
+            last = f"http {code}: {json.dumps(out)[:300]}"
+            if code < 500:
+                break
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}: {e.read().decode()[:300]}"
             if e.code < 500:
@@ -210,10 +221,12 @@ def team_slack_ids():
     if _team_ids is None:
         _team_ids = dict(SLACK_IDS)
         try:
-            req = urllib.request.Request(f"{DASHBOARD_API}?action=team_directory",
-                                         headers={"Authorization": f"Bearer {INGEST_SECRET}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                for p in json.load(r).get("team", []):
+            url = f"{DASHBOARD_API}?action=team_directory&key={urllib.parse.quote(INGEST_SECRET)}"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                d = json.load(r)
+                if d.get("http"):
+                    raise RuntimeError(f"http {d['http']}: {d.get('message')}")
+                for p in d.get("team", []):
                     if p.get("slack") and "closer" in (p.get("roles") or []):
                         _team_ids[p["name"].lower().split(" ")[0]] = p["slack"]
         except Exception as e:

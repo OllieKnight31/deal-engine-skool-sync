@@ -4,7 +4,7 @@ name: Automation health
 # The health check + Slack alarm ran on the studio Mac (launchd com.dealengine.sync-health,
 # every 3 h). On 22 Sept it missed two slots in a row because the lid was closed - a watcher
 # that sleeps with the laptop is not a watcher. Everything it watches already runs in the
-# cloud (this repo's chain, the Vercel relay), so the watcher lives here too.
+# cloud (this repo's chain, the GHL relay workflows, the Apps Script EOD backend), so the watcher lives here too.
 #
 # Trigger: the Skool sync chain DISPATCHES this workflow from its hand-off step at the end of
 # every run (~hourly), plus a 3-hourly cron as a backstop for the case where the chain itself
@@ -66,6 +66,9 @@ jobs:
           CALENDLY_PAT:    ${{ secrets.CALENDLY_PAT }}
           GHL_READ_PIT:    ${{ secrets.GHL_READ_PIT }}
           STRIPE_KEY:      ${{ secrets.STRIPE_KEY }}
+          EOD_API:         ${{ secrets.EOD_API }}          # Apps Script EOD backend (8 Nov 2026)
+          EOD_VIEW_KEY:    ${{ secrets.EOD_VIEW_KEY }}
+          GHL_RELAY_HOOKS: ${{ secrets.GHL_RELAY_HOOKS }}  # {calendly, close-hook, stripe} GHL inbound webhooks
           GH_TOKEN:        ${{ github.token }}
           FORCE_ALWAYS:    ${{ inputs.always && 'yes' || 'no' }}
         run: |

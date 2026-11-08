@@ -114,6 +114,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
           EVENT_INGEST_SECRET:    ${{ secrets.EVENT_INGEST_SECRET }}
+          EOD_API:                ${{ secrets.EOD_API }}   # Apps Script EOD backend (8 Nov 2026)
           SKOOL_PAYMENTS_CHANNEL: ${{ secrets.SKOOL_PAYMENTS_CHANNEL }}
           LOOP_MINUTES:    ${{ inputs.loop_minutes || '55' }}
           INTERVAL:        ${{ inputs.interval || '120' }}
