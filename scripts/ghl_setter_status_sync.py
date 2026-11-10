@@ -65,7 +65,7 @@ CLASSES = {
     "no_show":   (["No Show - Repeat Process"], ["No Show"]),
     "spoke":     (["Spoke – Qualifying"], ["Spoke – Qualifying"]),
     "qualified": (["Qualified – Not Booked"], ["Qualified – Not Booked"]),
-    "callback":  (["Callback Booked"], ["Callback Booked"]),
+    "callback":  (["Callback Booked"], ["Short Term Fu"]),  # Close renamed "Callback Booked" ~6 Nov 2026
     "call_set":  (["Call Set"], ["Call Booked", "Call Confirmed", "Closer Follow Up (Charlie)",
                                  "Closer Follow Up (Mike)", "Closer Follow Up (Daniel)", "Signed Up",
                                  "Signed Up - Balance Owed"]),
